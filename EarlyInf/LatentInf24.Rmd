@@ -1,0 +1,3421 @@
+---
+title: "LatentInf24"
+output: html_document
+date: "2024-12-13"
+---
+Data exploration/cleaning markdown for 2024 Latent Infection monitoring data
+```{r, load_packages}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+# install.packages("devtools")
+#devtools::install_github("davidsjoberg/ggsankey")
+library(networkD3)
+library(ggsankey)
+library(ggpubr)
+library(purrr)
+library(ggsankey)
+library(readr)
+library(stringr)
+library(patchwork)
+library(lme4)
+library(DHARMa)
+library(grid)
+library(gridExtra)
+```
+
+
+
+```{r, read_in_files}
+#set working directory
+library(readr)
+raw_data <- read_csv("latent_inf_2024.csv")
+View(raw_data)
+```
+
+
+```{r, long_format}
+#need to rename death_date column
+colnames(raw_data)[colnames(raw_data) == "Death_date"] <- "Mortality_date"
+colnames(raw_data)[colnames(raw_data) == "D0_infstatus"] <- "D0_INFSTATUS"
+
+long_data <- raw_data %>%
+  pivot_longer(
+    cols = starts_with("D"),  # Select only the columns to reshape
+    names_to = c("day_check", ".value"),
+    names_pattern = "(D[0-9]+)_(.+)"
+  )
+
+head(long_data)
+
+
+
+
+#make a new column for check number integer
+long_data$check <- as.numeric(gsub("\\D", "", long_data$day_check))
+```
+Clean data by making everything lowercase and checking that each infection type only has 1 unique ID
+
+```{r, clean_IDs}
+
+#check unique names of lakes 
+unique(long_data$Lake)
+
+#Sullivan is mispelled in at least one round. Fix this 
+long_data <- long_data %>% 
+mutate(Lake = case_when(
+        Lake %in% "Sullvian" ~ "Sullivan"
+        ,TRUE ~ Lake
+        )
+    )
+
+#for the sake of aesthetics, take the W out of crookedw 
+long_data <- long_data %>% 
+mutate(Lake = case_when(
+        Lake %in% "Crooked_W" ~ "Crooked"
+        ,TRUE ~ Lake
+        )
+    )
+
+#make all infection statues lowercase so coding is easier later on
+long_data$INFSTATUS <- tolower(long_data$INFSTATUS)
+
+#id all unique infection IDs to see which have to be changed
+unique(long_data$INFSTATUS)
+
+#Sus gut is not a real classification, so I am going to change it to uninfected
+long_data <- long_data %>% 
+mutate(INFSTATUS = case_when(
+        INFSTATUS %in% "sus_gut" ~ "u"
+        ,TRUE ~ INFSTATUS
+        )
+    )
+#"S" is meant to be sprite, change to sprite
+long_data <- long_data %>% 
+mutate(INFSTATUS = case_when(
+        INFSTATUS %in% "s" ~ "sprite"
+        ,TRUE ~ INFSTATUS
+        )
+    )
+#make both red and white spiro into "spiro"
+long_data <- long_data %>% 
+mutate(INFSTATUS = case_when(
+        INFSTATUS %in% c("white_spiro", "red_spiro") ~ "spiro"
+        ,TRUE ~ INFSTATUS
+        )
+    )
+#make all sprite & spiro coinfections uniform
+long_data <- long_data %>% 
+mutate(INFSTATUS = case_when(
+        INFSTATUS %in% c("sprite_white_spiro", "sprite_red_spiro") ~ "spiro"
+        ,TRUE ~ INFSTATUS
+        )
+    )
+#Switch all unknowns to unk
+
+#make all sprite & spiro coinfections uniform
+long_data <- long_data %>% 
+mutate(INFSTATUS = case_when(
+        INFSTATUS %in% c("unk_beady", "unk_spider", "unk_p/s", "unk_cloudy") ~ "unk"
+        ,TRUE ~ INFSTATUS
+        )
+    )
+#check all unique ids again
+unique(long_data$INFSTATUS)
+
+#rename columns to make coding easier
+colnames(long_data) <- gsub(" ", "_", colnames(long_data))
+
+```
+
+
+
+```{r, try_tile_plots}
+
+unique(long_data$INFSTATUS)
+##custom color palette for these data
+color_palette_all <- c("u" = "springgreen", "spiro" = "#ff4040", "micg" = "darkgoldenrod1",
+                   "sprite"="chocolate1", "brood"="deeppink",  
+                   "past"= "darkorchid1", "metsch"="#5CACEE", "unk"="gray50",
+                   "sprite_brood"= "deeppink4", "sprite_spiro"="brown4",
+                   "sprite_past"="darkorchid4", "sprite_metsch"="cadetblue4",
+                   "sprite_micg"="darkgoldenrod4","micg_past"="deeppink3", "micg_unk"="gray40",
+                   "dead"="black")
+
+
+#isolate cedar round 1 for a test of sankey & tile plots
+cedar1 <-long_data[long_data$Lake=="Cedar"&long_data$Round==1,]
+
+#try the tile plot I made last year
+cedar1_plot <- ggplot(cedar1, aes(x = as.factor(check), y = Animal_ID)) +
+  geom_tile(aes(fill=INFSTATUS), color="grey20") +
+  scale_fill_manual(values=color_palette_all, name="Infection Status")+
+  labs(x = "", y = "Animal ID") +
+  theme_minimal()
+cedar1_plot
+#it works!!
+```
+
+```{r, sankey_test}
+cedar1_sankey <- cedar1[c("Animal_ID", "Lake", "day_check", "INFSTATUS")]
+
+#pivot wider so that each check has it's own column where the infection status is the value (like the data input format)
+c1_wide <- pivot_wider(cedar1_sankey, names_from = day_check, values_from = INFSTATUS)
+colnames(c1_wide)
+
+##use the ggsankey function make_long to make a descriptive dataframe that ggsankey can use
+#use the correct checks
+sankey_df <- c1_wide %>%
+  make_long(D0, D1, D4, D8, D11, D15)
+
+#plot 
+test_sankey_plot <- ggplot(sankey_df, aes(x = x, 
+               next_x = next_x, 
+               node = node, 
+              label= node,
+               next_node = next_node,
+               fill = factor(node))) +
+  geom_sankey(flow.alpha = .6,
+              node.color = "gray30",
+              na.rm=TRUE)+
+  geom_sankey_label(size = 3, color = "white", fill = "gray30") +
+  theme_sankey(base_size = 18)+
+  #theme_minimal()+
+  scale_fill_manual(values=color_palette_all) +
+  labs(x = NULL)+
+  theme(axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.x = element_text(size=10),
+        legend.position = "none")
+test_sankey_plot
+
+```
+
+
+```{r, Make_main_sankey_for_manuscript}
+unique(long_data$INFSTATUS)
+##custom color palette for these data
+color_palette_abbrev <- c("Uninfected" = "springgreen", "SC" = "#ff4040", "OP" = "darkgoldenrod1",
+                   "PP"="chocolate1", "BP"="deeppink",  
+                   "PR"= "darkorchid1", "AM"="#5CACEE", "unk"="gray50",
+                   "PP&BP"= "deeppink4", "PP&SC"="brown4",
+                   "PP&PR"="darkorchid4", "PP&AM"="cadetblue4",
+                   "PP&OP"="darkgoldenrod4","OP&PR"="deeppink3", "OP&unk"="gray40",
+                   "Dead"="black")
+
+
+#isolate sullivan round 7 for this example plot
+sullivan7 <-long_data[long_data$Lake=="Sullivan"&long_data$Round==7,]
+
+#now we need to change the values in this dataset to have the abbreviations appropriate for the manuscript
+unique(sullivan7$INFSTATUS)
+
+sullivan7 <- sullivan7 %>%
+  mutate(INFSTATUS = case_when(
+    INFSTATUS == "u" ~ "Uninfected",
+    INFSTATUS == "past" ~ "PR",
+    INFSTATUS == "dead" ~ "Dead",
+    INFSTATUS == "sprite" ~ "PP",
+    INFSTATUS == "micg" ~ "OP",
+    INFSTATUS == "sprite_past" ~ "PP&PR",
+    INFSTATUS == "metsch" ~ "AM",
+    INFSTATUS == "sprite_micg" ~ "PP&OP",
+    INFSTATUS == "sprite_metsch" ~ "PP&AM",
+    INFSTATUS == "spiro" ~ "SC",
+    TRUE ~ INFSTATUS
+  ))
+
+#potentially reorder the factor levels so that it looks better for legend and for sankey plot purposes
+sullivan7 <- sullivan7 %>%
+  mutate(INFSTATUS = factor(INFSTATUS, levels = c("Dead", "AM", "SC","OP","PP","PP&PR","PP&OP",
+                                                  "PP&AM","PR","Uninfected")))
+
+
+#try the tile plot I made last year
+manuscript_tile <- ggplot(sullivan7, aes(x = as.factor(check), y = Animal_ID)) +
+  geom_tile(aes(fill=INFSTATUS), color="grey20") +
+  scale_fill_manual(values=color_palette_abbrev, name="Infection Status")+
+  labs(x = "Days since Field Collection", y = "") +
+  theme_minimal()+
+  theme(axis.text.y=element_blank(),
+        axis.title.x=element_text(size=12))
+manuscript_tile
+#it works!!
+
+
+
+
+
+#####now for the sankey plot for the manuscript
+sullivan7_sankey <- sullivan7[c("Animal_ID", "Lake", "day_check", "INFSTATUS")]
+
+#rename day_check so that node lables look better
+sullivan7_sankey <- sullivan7_sankey %>%
+  mutate(day_check = case_when(
+    day_check == "D0" ~ "Day0",
+    day_check == "D1" ~ "Day1",
+    day_check == "D4" ~ "Day4",
+    day_check == "D8" ~ "Day8",
+    day_check == "D11" ~ "Day11",
+    day_check == "D15" ~ "Day15",
+    TRUE ~ day_check
+  ))
+
+#pivot wider so that each check has it's own column where the infection status is the value (like the data input format)
+s7_wide <- pivot_wider(sullivan7_sankey, names_from = day_check, values_from = INFSTATUS)
+colnames(s7_wide)
+
+##use the ggsankey function make_long to make a descriptive dataframe that ggsankey can use
+#use the correct checks
+sankey_df <- s7_wide %>%
+  make_long(Day0, Day1, Day4, Day8, Day11, Day15)
+
+unique(sankey_df$node)
+unique(sankey_df$next_node)
+
+#reorder the factor levels in the sankey plot
+
+custom_order <-c("Dead", "AM", "SC","OP","PP","PP&PR","PP&OP", "PP&AM","PR","Uninfected")
+#potentially reorder the factor levels so that it looks better for legend and for sankey plot purposes
+sankey_df <- sankey_df %>%
+  mutate(
+    node = factor(node, levels = custom_order),
+    next_node = factor(next_node, levels = custom_order)
+  )
+
+#create a label data frame to rename the nodes
+#label_map <- c(
+#  "D0" = "0",
+#  "D1" = "1",
+#  "D4" = "4",
+#  "D8" = "8",
+#  "D11" = "11",
+#  "D15" = "15"
+#)
+
+#sankey_df <- sankey_df %>%
+ # mutate(node_label = recode(as.character(node), !!!label_map))
+
+
+##############none of the commented out code ended up working 
+#plot 
+manuscript_sankey_plot <- ggplot(sankey_df, aes(x = x, 
+               next_x = next_x, 
+               node = node, 
+              label= node,
+               next_node = next_node,
+               fill = factor(node))) +
+  geom_sankey(flow.alpha = .6,
+              node.color = "gray30",
+              na.rm=TRUE)+
+  geom_sankey_label(size = 5, color = "white", fill = "gray30") +
+  theme_sankey(base_size = 18)+
+  #theme_minimal()+
+  scale_fill_manual(values=color_palette_abbrev) +
+  labs(x = NULL)+
+  theme(axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.x = element_text(size=12),
+        legend.position = "bottom",
+        legend.title = element_blank(),
+        legend.text = element_text(size = 10),
+        legend.key.size = unit(0.6, "cm"),)
+manuscript_sankey_plot
+
+
+
+##now ggarrange these ladies
+#edit the individual legend to make it smaller in the common legend
+manuscript_tile<- manuscript_tile +
+  theme(legend.position = "none"
+  )  
+
+manuscript_tile
+
+
+
+
+
+manuscript_combo <- ggarrange(manuscript_tile,
+                      manuscript_sankey_plot,
+                      common.legend = FALSE,
+                      widths = c(1,3)) 
+manuscript_combo
+
+ggsave("s7_sankey_draft.png", manuscript_combo, width = 12, height = 8, dpi=400, bg="white")
+
+```
+
+Scale to put out graphs for all rounds and lakes. Then, aggregate plots for each lake over time
+
+```{r, cedar_tile_plots}
+
+#make each round it's own data set
+cedar_all <- long_data[long_data$Lake=="Cedar",]
+
+#use the lapply function to make unique plots for all lakes/rounds. 
+#create a unique vector of lakes
+roundnum <- unique(long_data$Round)
+
+#lake individual plots but with points instead
+cedar_tiles <- lapply(roundnum, function(round) {
+ggplot(cedar_all[cedar_all$Round==round,], aes(x = as.factor(check), y = Animal_ID)) +
+  geom_tile(aes(fill=cedar_all$INFSTATUS[cedar_all$Round==round]), color="grey20") +
+  scale_fill_manual(values=color_palette_all, name="Infection Status")+
+  labs(x = "Check", y = "", title = paste("Cedar infections over time in animals round", round)) +
+  theme_minimal()+theme(axis.text.y=element_blank())
+})
+
+
+cedar_tiles
+
+
+# Define specific names for each plot
+plot_names <- c("tileplot_c1", "tileplot_c2", "tileplot_c3", "tileplot_c4", "tileplot_c5", "tileplot_c6",
+                "tileplot_c7", "tileplot_c8", "tileplot_c9")
+
+# Assign each plot in the list to the specified name
+for (i in seq_along(cedar_tiles)) {
+  assign(plot_names[i], cedar_tiles[[i]])
+}
+
+# Check the workspace to confirm
+ls()
+```
+```{r, crooked_w_tileplots}
+#make each round it's own data set
+cw_all <- long_data[long_data$Lake=="Crooked",]
+
+#use the lapply function to make unique plots for all lakes/rounds. 
+#create a unique vector of lakes
+roundnum <- unique(cw_all$Round)
+
+#lake individual plots but with points instead
+cw_tiles <- lapply(roundnum, function(round) {
+ggplot(cw_all[cw_all$Round==round,], aes(x = as.factor(check), y = Animal_ID)) +
+  geom_tile(aes(fill=cw_all$INFSTATUS[cw_all$Round==round]), color="grey20") +
+  scale_fill_manual(values=color_palette_all, name="Infection Status")+
+  labs(x = "Check", y = "", title = paste("Crooked W infections over time in animals round", round)) +
+  theme_minimal()+theme(axis.text.y=element_blank())
+})
+
+
+cw_tiles
+
+
+# Define specific names for each plot
+plot_names <- c("tileplot_cw1", "tileplot_cw2", "tileplot_cw3", "tileplot_cw4", "tileplot_cw6",
+                "tileplot_cw7", "tileplot_cw8", "tileplot_cw9")
+
+# Assign each plot in the list to the specified name
+for (i in seq_along(cw_tiles)) {
+  assign(plot_names[i], cw_tiles[[i]])
+}
+
+tileplot_cw1
+# Check the workspace to confirm
+ls()
+```
+
+```{r, bishop_tileplots}
+#make each round it's own data set
+bishop_all <- long_data[long_data$Lake=="Bishop",]
+
+#use the lapply function to make unique plots for all lakes/rounds. 
+#create a unique vector of lakes
+roundnum <- unique(bishop_all$Round)
+
+#lake individual plots but with points instead
+bishop_tiles <- lapply(roundnum, function(round) {
+ggplot(bishop_all[bishop_all$Round==round,], aes(x = as.factor(check), y = Animal_ID)) +
+  geom_tile(aes(fill=bishop_all$INFSTATUS[bishop_all$Round==round]), color="grey20") +
+  scale_fill_manual(values=color_palette_all, name="Infection Status")+
+  labs(x = "Check", y = "", title = paste("Bishop infections over time in animals round", round)) +
+  theme_minimal()+theme(axis.text.y=element_blank())
+})
+
+
+bishop_tiles
+
+
+# Define specific names for each plot
+plot_names <- c("tileplot_bishop1", "tileplot_bishop2", "tileplot_bishop3", "tileplot_bishop4", 
+                "tileplot_bishop5", "tileplot_bishop6", "tileplot_bishop7", "tileplot_bishop8",
+                "tileplot_bishop9")
+
+# Assign each plot in the list to the specified name
+for (i in seq_along(bishop_tiles)) {
+  assign(plot_names[i], bishop_tiles[[i]])
+}
+
+# Check the workspace to confirm
+ls()
+```
+```{r, walsh_tileplots}
+#make each round it's own data set
+walsh_all <- long_data[long_data$Lake=="Walsh",]
+
+#use the lapply function to make unique plots for all lakes/rounds. 
+#create a unique vector of lakes
+roundnum <- unique(walsh_all$Round)
+
+#lake individual plots but with points instead
+walsh_tiles <- lapply(roundnum, function(round) {
+ggplot(walsh_all[walsh_all$Round==round,], aes(x = as.factor(check), y = Animal_ID)) +
+  geom_tile(aes(fill=walsh_all$INFSTATUS[walsh_all$Round==round]), color="grey20") +
+  scale_fill_manual(values=color_palette_all, name="Infection Status")+
+  labs(x = "Check", y = "", title = paste("Walsh infections over time in animals round", round)) +
+  theme_minimal()+theme(axis.text.y=element_blank())
+})
+
+
+walsh_tiles
+
+
+# Define specific names for each plot
+plot_names <- c("tileplot_walsh1", "tileplot_walsh2", "tileplot_walsh3", "tileplot_walsh4", 
+                "tileplot_walsh5", "tileplot_walsh6", "tileplot_walsh7", "tileplot_walsh8",
+                "tileplot_walsh9")
+
+# Assign each plot in the list to the specified name
+for (i in seq_along(walsh_tiles)) {
+  assign(plot_names[i], walsh_tiles[[i]])
+}
+
+# Check the workspace to confirm
+ls()
+```
+
+
+```{r, mill_tileplots}
+#make each round it's own data set
+mill_all <- long_data[long_data$Lake=="Mill",]
+
+#use the lapply function to make unique plots for all lakes/rounds. 
+#create a unique vector of lakes
+roundnum <- unique(mill_all$Round)
+
+#lake individual plots but with points instead
+mill_tiles <- lapply(roundnum, function(round) {
+ggplot(mill_all[mill_all$Round==round,], aes(x = as.factor(check), y = Animal_ID)) +
+  geom_tile(aes(fill=mill_all$INFSTATUS[mill_all$Round==round]), color="grey20") +
+  scale_fill_manual(values=color_palette_all, name="Infection Status")+
+  labs(x = "Check", y = "", title = paste("Mill infections over time in animals round", round)) +
+  theme_minimal()+theme(axis.text.y=element_blank())
+})
+
+
+mill_tiles
+
+
+# Define specific names for each plot
+plot_names <- c("tileplot_mill1", "tileplot_mill2", "tileplot_mill3", "tileplot_mill4", 
+                "tileplot_mill5", "tileplot_mill6", "tileplot_mill8")
+
+# Assign each plot in the list to the specified name
+for (i in seq_along(mill_tiles)) {
+  assign(plot_names[i], mill_tiles[[i]])
+}
+
+# Check the workspace to confirm
+ls()
+```
+
+
+```{r, sullivan_tileplots}
+#make each round it's own data set
+sullivan_all <- long_data[long_data$Lake=="Sullivan",]
+
+#use the lapply function to make unique plots for all lakes/rounds. 
+#create a unique vector of lakes
+roundnum <- unique(sullivan_all$Round)
+
+#lake individual plots but with points instead
+sullivan_tiles <- lapply(roundnum, function(round) {
+ggplot(sullivan_all[sullivan_all$Round==round,], aes(x = as.factor(check), y = Animal_ID)) +
+  geom_tile(aes(fill=sullivan_all$INFSTATUS[sullivan_all$Round==round]), color="grey20") +
+  scale_fill_manual(values=color_palette_all, name="Infection Status")+
+  labs(x = "Check", y = "", title = paste("Sullivan infections over time in animals round", round)) +
+  theme_minimal()+theme(axis.text.y=element_blank())
+})
+
+
+sullivan_tiles
+
+
+# Define specific names for each plot
+plot_names <- c("tileplot_sullivan1", "tileplot_sullivan2", "tileplot_sullivan3", "tileplot_sullivan4", 
+                "tileplot_sullivan5", "tileplot_sullivan6", "tileplot_sullivan7", "tileplot_sullivan8",
+                "tileplot_sullivan9")
+
+# Assign each plot in the list to the specified name
+for (i in seq_along(sullivan_tiles)) {
+  assign(plot_names[i], sullivan_tiles[[i]])
+}
+
+# Check the workspace to confirm
+ls()
+```
+
+Ok, now we have tileplots for all of the rounds and lakes
+Now we have to make the industrial level sankey plots
+
+```{r, cedar_sankeys}
+cedar_sankey <- cedar_all[c("Animal_ID", "Round", "Lake", "day_check", "INFSTATUS")]
+
+#pivot wider so that each check has it's own column where the infection status is the value (like the data input format)
+roundnum <- unique(cedar_sankey$Round)
+cedar_sankeyplots <- lapply(roundnum, function(round){
+data_wide <- pivot_wider(cedar_sankey[cedar_sankey$Round==round,], names_from = day_check, values_from = INFSTATUS)
+colnames(data_wide)
+
+##use the ggsankey function make_long to make a descriptive dataframe that ggsankey can use
+#use the correct checks
+sankey_df <- data_wide %>%
+  make_long(D0, D1, D4, D8, D11, D15)
+
+#plot 
+test_sankey_plot <- ggplot(sankey_df, aes(x = x, 
+               next_x = next_x, 
+               node = node, 
+              label= node,
+               next_node = next_node,
+               fill = factor(node))) +
+  geom_sankey(flow.alpha = .6,
+              node.color = "gray30",
+              na.rm=TRUE)+
+  geom_sankey_label(size = 3, color = "white", fill = "gray30") +
+  theme_sankey(base_size = 18)+
+  #theme_minimal()+
+  scale_fill_manual(values=color_palette_all) +
+  labs(x = NULL, title=paste("Cedar Sankey Plot Round", round))+
+  theme(axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.x = element_text(size=10),
+        legend.position = "none")
+test_sankey_plot
+})
+cedar_sankeyplots
+
+#unlist plots
+# Define specific names for each plot
+plot_names <- c("sankey_cedar1", "sankey_cedar2", "sankey_cedar3", "sankey_cedar4", 
+                "sankey_cedar5", "sankey_cedar6", "sankey_cedar7", "sankey_cedar8",
+                "sankey_cedar9")
+
+# Assign each plot in the list to the specified name
+for (i in seq_along(cedar_sankeyplots)) {
+  assign(plot_names[i], cedar_sankeyplots[[i]])
+}
+
+# Check the workspace to confirm
+ls()
+```   
+
+
+```{r, crookedw_sankeys}
+crookedw_sankey <- cw_all[c("Animal_ID", "Round", "Lake", "day_check", "INFSTATUS")]
+
+#pivot wider so that each check has it's own column where the infection status is the value (like the data input format)
+roundnum <- unique(crookedw_sankey$Round)
+crookedw_sankeyplots <- lapply(roundnum, function(round){
+data_wide <- pivot_wider(crookedw_sankey[crookedw_sankey$Round==round,], names_from = day_check, values_from = INFSTATUS)
+colnames(data_wide)
+
+##use the ggsankey function make_long to make a descriptive dataframe that ggsankey can use
+#use the correct checks
+sankey_df <- data_wide %>%
+  make_long(D0, D1, D4, D8, D11, D15)
+
+#plot 
+test_sankey_plot <- ggplot(sankey_df, aes(x = x, 
+               next_x = next_x, 
+               node = node, 
+              label= node,
+               next_node = next_node,
+               fill = factor(node))) +
+  geom_sankey(flow.alpha = .6,
+              node.color = "gray30",
+              na.rm=TRUE)+
+  geom_sankey_label(size = 3, color = "white", fill = "gray30") +
+  theme_sankey(base_size = 18)+
+  #theme_minimal()+
+  scale_fill_manual(values=color_palette_all) +
+  labs(x = NULL, title=paste("crookedw Sankey Plot Round", round))+
+  theme(axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.x = element_text(size=10),
+        legend.position = "none")
+test_sankey_plot
+})
+crookedw_sankeyplots
+
+#unlist plots
+# Define specific names for each plot
+plot_names <- c("sankey_crookedw1", "sankey_crookedw2", "sankey_crookedw3", "sankey_crookedw4", 
+                "sankey_crookedw6", "sankey_crookedw7", "sankey_crookedw8",
+                "sankey_crookedw9")
+
+# Assign each plot in the list to the specified name
+for (i in seq_along(crookedw_sankeyplots)) {
+  assign(plot_names[i], crookedw_sankeyplots[[i]])
+}
+
+# Check the workspace to confirm
+ls()
+```  
+```{r, bishop_sankeys}
+bishop_sankey <- bishop_all[c("Animal_ID", "Round", "Lake", "day_check", "INFSTATUS")]
+
+#pivot wider so that each check has it's own column where the infection status is the value (like the data input format)
+roundnum <- unique(bishop_sankey$Round)
+bishop_sankeyplots <- lapply(roundnum, function(round){
+data_wide <- pivot_wider(bishop_sankey[bishop_sankey$Round==round,], names_from = day_check, values_from = INFSTATUS)
+colnames(data_wide)
+
+##use the ggsankey function make_long to make a descriptive dataframe that ggsankey can use
+#use the correct checks
+sankey_df <- data_wide %>%
+  make_long(D0, D1, D4, D8, D11, D15)
+
+#plot 
+test_sankey_plot <- ggplot(sankey_df, aes(x = x, 
+               next_x = next_x, 
+               node = node, 
+              label= node,
+               next_node = next_node,
+               fill = factor(node))) +
+  geom_sankey(flow.alpha = .6,
+              node.color = "gray30",
+              na.rm=TRUE)+
+  geom_sankey_label(size = 3, color = "white", fill = "gray30") +
+  theme_sankey(base_size = 18)+
+  #theme_minimal()+
+  scale_fill_manual(values=color_palette_all) +
+  labs(x = NULL, title=paste("bishop Sankey Plot Round", round))+
+  theme(axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.x = element_text(size=10),
+        legend.position = "none")
+test_sankey_plot
+})
+bishop_sankeyplots
+
+#unlist plots
+# Define specific names for each plot
+plot_names <- c("sankey_bishop1", "sankey_bishop2", "sankey_bishop3", "sankey_bishop4", 
+                "sankey_bishop5", "sankey_bishop6", "sankey_bishop7", "sankey_bishop8",
+                "sankey_bishop9")
+
+# Assign each plot in the list to the specified name
+for (i in seq_along(bishop_sankeyplots)) {
+  assign(plot_names[i], bishop_sankeyplots[[i]])
+}
+
+# Check the workspace to confirm
+ls()
+```    
+
+```{r, walsh_sankeys}
+walsh_sankey <- walsh_all[c("Animal_ID", "Round", "Lake", "day_check", "INFSTATUS")]
+
+#pivot wider so that each check has it's own column where the infection status is the value (like the data input format)
+roundnum <- unique(walsh_sankey$Round)
+walsh_sankeyplots <- lapply(roundnum, function(round){
+data_wide <- pivot_wider(walsh_sankey[walsh_sankey$Round==round,], names_from = day_check, values_from = INFSTATUS)
+colnames(data_wide)
+
+##use the ggsankey function make_long to make a descriptive dataframe that ggsankey can use
+#use the correct checks
+sankey_df <- data_wide %>%
+  make_long(D0, D1, D4, D8, D11, D15)
+
+#plot 
+test_sankey_plot <- ggplot(sankey_df, aes(x = x, 
+               next_x = next_x, 
+               node = node, 
+              label= node,
+               next_node = next_node,
+               fill = factor(node))) +
+  geom_sankey(flow.alpha = .6,
+              node.color = "gray30",
+              na.rm=TRUE)+
+  geom_sankey_label(size = 3, color = "white", fill = "gray30") +
+  theme_sankey(base_size = 18)+
+  #theme_minimal()+
+  scale_fill_manual(values=color_palette_all) +
+  labs(x = NULL, title=paste("walsh Sankey Plot Round", round))+
+  theme(axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.x = element_text(size=10),
+        legend.position = "none")
+test_sankey_plot
+})
+walsh_sankeyplots
+
+#unlist plots
+# Define specific names for each plot
+plot_names <- c("sankey_walsh1", "sankey_walsh2", "sankey_walsh3", "sankey_walsh4", 
+                "sankey_walsh5", "sankey_walsh6", "sankey_walsh7", "sankey_walsh8",
+                "sankey_walsh9")
+
+# Assign each plot in the list to the specified name
+for (i in seq_along(walsh_sankeyplots)) {
+  assign(plot_names[i], walsh_sankeyplots[[i]])
+}
+
+# Check the workspace to confirm
+ls()
+``` 
+```{r, mill_sankeys}
+mill_sankey <- mill_all[c("Animal_ID", "Round", "Lake", "day_check", "INFSTATUS")]
+
+#pivot wider so that each check has it's own column where the infection status is the value (like the data input format)
+roundnum <- unique(mill_sankey$Round)
+mill_sankeyplots <- lapply(roundnum, function(round){
+data_wide <- pivot_wider(mill_sankey[mill_sankey$Round==round,], names_from = day_check, values_from = INFSTATUS)
+colnames(data_wide)
+
+##use the ggsankey function make_long to make a descriptive dataframe that ggsankey can use
+#use the correct checks
+sankey_df <- data_wide %>%
+  make_long(D0, D1, D4, D8, D11, D15)
+
+#plot 
+test_sankey_plot <- ggplot(sankey_df, aes(x = x, 
+               next_x = next_x, 
+               node = node, 
+              label= node,
+               next_node = next_node,
+               fill = factor(node))) +
+  geom_sankey(flow.alpha = .6,
+              node.color = "gray30",
+              na.rm=TRUE)+
+  geom_sankey_label(size = 3, color = "white", fill = "gray30") +
+  theme_sankey(base_size = 18)+
+  #theme_minimal()+
+  scale_fill_manual(values=color_palette_all) +
+  labs(x = NULL, title=paste("mill Sankey Plot Round", round))+
+  theme(axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.x = element_text(size=10),
+        legend.position = "none")
+test_sankey_plot
+})
+mill_sankeyplots
+
+#unlist plots
+# Define specific names for each plot
+plot_names <- c("sankey_mill1", "sankey_mill2", "sankey_mill3", "sankey_mill4", 
+                "sankey_mill5", "sankey_mill6", "sankey_mill8")
+
+# Assign each plot in the list to the specified name
+for (i in seq_along(mill_sankeyplots)) {
+  assign(plot_names[i], mill_sankeyplots[[i]])
+}
+
+# Check the workspace to confirm
+ls()
+```   
+```{r, sullivan_sankeys}
+sullivan_sankey <- sullivan_all[c("Animal_ID", "Round", "Lake", "day_check", "INFSTATUS")]
+
+#pivot wider so that each check has it's own column where the infection status is the value (like the data input format)
+roundnum <- unique(sullivan_sankey$Round)
+sullivan_sankeyplots <- lapply(roundnum, function(round){
+data_wide <- pivot_wider(sullivan_sankey[sullivan_sankey$Round==round,], names_from = day_check, values_from = INFSTATUS)
+colnames(data_wide)
+
+##use the ggsankey function make_long to make a descriptive dataframe that ggsankey can use
+#use the correct checks
+sankey_df <- data_wide %>%
+  make_long(D0, D1, D4, D8, D11, D15)
+
+#plot 
+test_sankey_plot <- ggplot(sankey_df, aes(x = x, 
+               next_x = next_x, 
+               node = node, 
+              label= node,
+               next_node = next_node,
+               fill = factor(node))) +
+  geom_sankey(flow.alpha = .6,
+              node.color = "gray30",
+              na.rm=TRUE)+
+  geom_sankey_label(size = 3, color = "white", fill = "gray30") +
+  theme_sankey(base_size = 18)+
+  #theme_minimal()+
+  scale_fill_manual(values=color_palette_all) +
+  labs(x = NULL, title=paste("sullivan Sankey Plot Round", round))+
+  theme(axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.x = element_text(size=10),
+        legend.position = "none")
+test_sankey_plot
+})
+sullivan_sankeyplots
+
+#unlist plots
+# Define specific names for each plot
+plot_names <- c("sankey_sullivan1", "sankey_sullivan2", "sankey_sullivan3", "sankey_sullivan4", 
+                "sankey_sullivan5", "sankey_sullivan6", "sankey_sullivan7", "sankey_sullivan8",
+                "sankey_sullivan9")
+
+# Assign each plot in the list to the specified name
+for (i in seq_along(sullivan_sankeyplots)) {
+  assign(plot_names[i], sullivan_sankeyplots[[i]])
+}
+sankey_sullivan1
+
+# Check the workspace to confirm
+ls()
+``` 
+```{r, ggarrange}
+mill8_combo <- ggarrange(tileplot_mill8,
+                      sankey_mill8, 
+                      common.legend = TRUE,
+                      legend = "bottom",
+                      widths = c(1,3)) 
+mill8_combo
+
+
+#put all tile plots next to each other
+mill_tilesr1_5 <- ggarrange(tileplot_mill1, tileplot_mill2, tileplot_mill3, 
+                              tileplot_mill4,  
+                      common.legend = TRUE,
+                      legend = "bottom",
+                      ncol=4,
+                      nrow=1) 
+mill_tilesr1_5
+
+mill_tilesr6_9 <- ggarrange(tileplot_mill5, tileplot_mill6, tileplot_mill8,
+                      common.legend = TRUE,
+                      legend = "bottom",
+                      ncol=3,
+                      nrow=1) 
+mill_tilesr6_9
+```
+++++++++++++++++++++++++++++++++++++++++++++++
+++++++++++++++++++++++++++++++++++++++++++++++
+++++++++++++++++++++++++++++++++++++++++++++++
+++++++++++++++++++++++++++++++++++++++++++++++
+++++++++++++++++++++++++++++++++++++++++++++++
+
+Alright, now that we have done preliminary figures for all the data, we need to do further exploratory graphs. I am first going to look at round 9 for all the lakes, separating out all the males and females.
+
+```{r, m/f_comparisons}
+#first, create a new df for just round 9
+r9_all <- long_data[long_data$Round==9,]
+
+#create a sex column combining A & Js into F and leaving M as M
+r9_all$sex <- ifelse(r9_all$Age %in% c("A", "J"), "F",
+                     ifelse(r9_all$Age=="M","M",NA))
+
+###create separate tileplots for for males and females for each of the lakes
+
+#use the lapply function to make unique plots for all lakes/rounds. 
+#create a unique vector of lakes
+lake_vec <- unique(r9_all$Lake)
+lake_vec
+
+#lake individual plots but with points instead
+r9_mf_tiles <- lapply(lake_vec, function(lake) {
+ggplot(r9_all[r9_all$Lake==lake,], aes(x = as.factor(check), y = Animal_ID)) +
+  geom_tile(aes(fill=r9_all$INFSTATUS[r9_all$Lake==lake]), color="grey20") +
+  facet_wrap(~sex)+
+  scale_fill_manual(values=color_palette_all, name="Infection Status")+
+  labs(x = "Check", y = "", title = paste("M/F Infections during r9 in", lake)) +
+  theme_minimal()+theme(axis.text.y=element_blank())
+})
+
+
+r9_mf_tiles
+
+
+# Define specific names for each plot
+plot_names <- c("mf_cedar", "mf_cw","mf_bishop", "mf_walsh", "mf_sullivan")
+
+# Assign each plot in the list to the specified name
+for (i in seq_along(r9_mf_tiles)) {
+  assign(plot_names[i], r9_mf_tiles[[i]])
+}
+
+# Check the workspace to confirm
+ls()
+mf_cedar
+```
+I think these comparisons would better be visualized as sankeys. See if we can do this
+
+```{r, r9_mf_sankeys}
+r9_sankey <- r9_all[c("Animal_ID", "Round", "Lake", "day_check", "INFSTATUS","sex")]
+
+#given the way sankey plots are created, I don't think we can just facet wrap by sex later on, instead, we're going to have to subset by sex earlier on, then ggarrange after doing all males and female plots separately 
+r9_sankey <-r9_sankey[r9_sankey$sex=="M",]
+#pivot wider so that each check has it's own column where the infection status is the value (like the data input format)
+lake_vec <- unique(r9_sankey$Lake)
+r9_sankeyplots <- lapply(lake_vec, function(lake){
+data_wide <- pivot_wider(r9_sankey[r9_sankey$Lake==lake,], names_from = day_check, values_from = INFSTATUS)
+colnames(data_wide)
+
+##use the ggsankey function make_long to make a descriptive dataframe that ggsankey can use
+#use the correct checks
+sankey_df <- data_wide %>%
+  make_long(D0, D1, D4, D8, D11, D15)
+
+#plot 
+test_sankey_plot <- ggplot(sankey_df, aes(x = x, 
+               next_x = next_x, 
+               node = node, 
+              label= node,
+               next_node = next_node,
+               fill = factor(node))) +
+  geom_sankey(flow.alpha = .6,
+              node.color = "gray30",
+              na.rm=TRUE)+
+  geom_sankey_label(size = 3, color = "white", fill = "gray30") +
+  theme_sankey(base_size = 18)+
+  #theme_minimal()+
+  scale_fill_manual(values=color_palette_all) +
+  labs(x = NULL, title=paste("Male LI in", lake))+
+  theme(axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.x = element_text(size=10),
+        legend.position = "none")
+test_sankey_plot
+})
+r9_sankeyplots
+
+#unlist plots
+# Define specific names for each plot
+plot_names <- c("malesankey_cedar", "malesankey_cw", "malesankey_bishop", "malesankey_walsh", 
+                "malesankey_sullivan")
+
+# Assign each plot in the list to the specified name
+for (i in seq_along(r9_sankeyplots)) {
+  assign(plot_names[i], r9_sankeyplots[[i]])
+}
+malesankey_walsh
+
+# Check the workspace to confirm
+ls()
+
+#######################################
+######################################
+########################################
+#######################################
+######################################
+#now repeat the above code with females
+#first, redo the original df, then subset by sex again
+r9_sankey <- r9_all[c("Animal_ID", "Round", "Lake", "day_check", "INFSTATUS","sex")]
+r9_sankey <-r9_sankey[r9_sankey$sex=="F",]
+
+#pivot wider so that each check has it's own column where the infection status is the value (like the data input format)
+lake_vec <- unique(r9_sankey$Lake)
+r9_f_sankeyplots <- lapply(lake_vec, function(lake){
+data_wide <- pivot_wider(r9_sankey[r9_sankey$Lake==lake,], names_from = day_check, values_from = INFSTATUS)
+colnames(data_wide)
+
+##use the ggsankey function make_long to make a descriptive dataframe that ggsankey can use
+#use the correct checks
+sankey_df <- data_wide %>%
+  make_long(D0, D1, D4, D8, D11, D15)
+
+#plot 
+test_sankey_plot <- ggplot(sankey_df, aes(x = x, 
+               next_x = next_x, 
+               node = node, 
+              label= node,
+               next_node = next_node,
+               fill = factor(node))) +
+  geom_sankey(flow.alpha = .6,
+              node.color = "gray30",
+              na.rm=TRUE)+
+  geom_sankey_label(size = 3, color = "white", fill = "gray30") +
+  theme_sankey(base_size = 18)+
+  #theme_minimal()+
+  scale_fill_manual(values=color_palette_all) +
+  labs(x = NULL, title=paste("Female LI in", lake))+
+  theme(axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.x = element_text(size=10),
+        legend.position = "none")
+test_sankey_plot
+})
+r9_f_sankeyplots
+
+#unlist plots
+# Define specific names for each plot
+plot_names <- c("femalesankey_cedar", "femalesankey_cw", "femalesankey_bishop", "femalesankey_walsh", 
+                "femalesankey_sullivan")
+
+# Assign each plot in the list to the specified name
+for (i in seq_along(r9_f_sankeyplots)) {
+  assign(plot_names[i], r9_f_sankeyplots[[i]])
+}
+femalesankey_walsh
+``` 
+Now that we have all the sankey plots for males and females, we just have to ggarrange them 
+```{r, arrange_mf_sankeys}
+cedar_mf <- ggarrange(femalesankey_cedar,
+                      malesankey_cedar, 
+                      common.legend = TRUE,
+                      legend = "bottom",
+                      widths = c(2,2)) 
+cedar_mf
+
+#CW
+cw_mf <- ggarrange(femalesankey_cw,
+                      malesankey_cw, 
+                      common.legend = TRUE,
+                      legend = "bottom",
+                      widths = c(2,2)) 
+cw_mf
+
+#bishop
+bishop_mf <- ggarrange(femalesankey_bishop,
+                      malesankey_bishop, 
+                      common.legend = TRUE,
+                      legend = "bottom",
+                      widths = c(2,2)) 
+bishop_mf
+
+#walsh
+walsh_mf <- ggarrange(femalesankey_walsh,
+                      malesankey_walsh, 
+                      common.legend = TRUE,
+                      legend = "bottom",
+                      widths = c(2,2)) 
+walsh_mf
+
+#sullivan
+sullivan_mf <- ggarrange(femalesankey_sullivan,
+                      malesankey_sullivan, 
+                      common.legend = TRUE,
+                      legend = "bottom",
+                      widths = c(2,2)) 
+sullivan_mf
+```
+
+Now it's time to work on identifying all of the individuals which had simultaneous of sequential co-infections. To do this, we are gonna have to write code to look across all the checks and determine if there are more than 2 types of infection status NOT include dead or uninfected. Which I imagine will be some kind of fancy ifelse loop.
+
+Maybe the first easiest thing to do is find and summarize the number of individuals which had simultaneous infections over the course of the entire experiment.
+```{r, quanitfy_simultaneous_coinf}
+#determine the number of unique infection statuses
+length(unique(long_data$INFSTATUS)) #16 unique infection status (14 of which are unique infection types)
+unique(long_data$INFSTATUS) #7 of 16 are confections 
+
+#use the wide formatted data for this manipulation
+#since we did all data cleaning with the long data format, we need to first compress back to a wide format with the clean data
+# we first need to remove the "check column"
+long_data_reformattting<- subset(long_data, select = -check )
+long_data_reformattting<- subset(long_data_reformattting, select = -date )
+#NOTE: Wdie data does not have the date attributed to each check
+#reformat to wide (removal of check and date columns was necessary to compress data to wide format)
+data_wide <- pivot_wider(long_data_reformattting, names_from = day_check, values_from = INFSTATUS)
+#create a vector of all co-infection types
+coinfs<- c("sprite_spiro","sprite_metsch","micg_unk_p/s","sprite_brood","micg_past",
+           "sprite_micg","sprite_past")
+
+#add a row to the wide data that determines the proportion of animals which ever had a coinfection
+data_wide$has_coinfs <- apply(data_wide[, c("D0", "D1","D4", "D8","D11","D15")], 1, function(row){
+  any(row %in% coinfs)
+})
+
+mean(data_wide$has_coinfs)*100 #~1.5% of individual animals had at some point a simultaneous co-inf
+
+#determine proportion of animals across lakes that have simultaneous co-infections 
+proportions_by_group <- data_wide %>%
+  group_by(Lake) %>%              # Group by the classification column
+  summarize(
+    proportion_with_target = mean(has_coinfs) # Calculate the proportion
+  )
+
+
+
+proportions_by_group #Crooked W & Mill had much less simultaneous coinfections 
+```
+COME BACK HERE TO DO THE "SEQUENTIAL COINFECTIONS"
+```{r, coinf}
+
+```
+
+___________________________________
+__________________________________
+____________________________________
+SUMMARY GRAPHS 
+
+Now I'm going to try to make summary graphs. I think the way to go about this will be to make separate T/F columns in the wide data to scan for each parasite. So there will be a "micg inf" column, and a "metsch" column. Then we can determine if they had simultaneous coinfections somehow? With sums >2 of all the infection T/F columns. IDK how we handle simultaneous & sequential coinfections.
+
+For the summary statistics, as with the field data, I will count co-infections as a "T" count for each individual parasite. So, if there is a micg-sprite infection, it will count as T for presence of infection by both micg and sprite. 
+
+```{r, summarize_dataorganizing}
+#for each parasite, create new column in the wide data which scans the check dates and determines if there are any checks with that parasite.
+
+#look at unique infection statuses across all data (using long data again)
+unique(long_data$INFSTATUS)
+
+#first, I will do metsch since I know that probably has the fewest (and most predictable since it only appeared in one lake)
+#the only presenting co-infection with metsch was sprite
+#create a vector of all the values that indicate metsch
+Y_metsch <- c("metsch","sprite_metsch")
+
+#run a function that searches all checks for any values in the "Y_metsch" vector
+data_wide$metsch <- apply(data_wide[, c("D0", "D1","D4", "D8","D11","D15")], 1, function(row){
+  any(row %in% Y_metsch)
+})
+
+#past
+Y_past <- c("past", "micg_past", "sprite_past")
+
+
+data_wide$past <- apply(data_wide[, c("D0", "D1","D4", "D8","D11","D15")], 1, function(row){
+  any(row %in% Y_past)
+})
+
+
+#brood
+Y_brood <- c("brood", "sprite_brood")
+
+data_wide$brood <- apply(data_wide[, c("D0", "D1","D4", "D8","D11","D15")], 1, function(row){
+  any(row %in% Y_brood)
+})
+
+#spiro
+Y_spiro <- c("spiro", "sprite_spiro")
+
+data_wide$spiro <- apply(data_wide[, c("D0", "D1","D4", "D8","D11","D15")], 1, function(row){
+  any(row %in% Y_spiro)
+})
+
+#micg
+Y_micg <- c("micg", "micg_unk_p/s", "micg_past", "sprite_micg")
+
+data_wide$micg <- apply(data_wide[, c("D0", "D1","D4", "D8","D11","D15")], 1, function(row){
+  any(row %in% Y_micg)
+})
+
+#sprite
+Y_sprite <- c("sprite", "sprite_metsch", "sprite_spiro", "spiro_brood", "sprite_micg",
+              "sprite_past")
+
+data_wide$sprite <- apply(data_wide[, c("D0", "D1","D4", "D8","D11","D15")], 1, function(row){
+  any(row %in% Y_sprite)
+})
+```
+Ok, now that that's done, we can make a summary data set which finds the proportion of animals by each lake/date
+
+```{r, summary_stats_figures}
+
+#determine proportion with metsch infections for each round   
+proportions_metsch <- data_wide %>%
+  group_by(Lake, Round) %>%              # Group by the classification column
+  summarize(
+    proportion_metsch = mean(metsch),
+    total_ind=n()                        # Calculate the proportion
+  )
+
+proportions_metsch
+max(proportions_metsch$proportion_metsch)
+
+#past
+proportions_past <- data_wide %>%
+  group_by(Lake, Round) %>%              # Group by the classification column
+  summarize(
+    proportion_past = mean(past), # Calculate the proportion
+    total_ind=n()
+  )
+
+proportions_past
+max(proportions_past$proportion_past)
+
+#brood
+proportions_brood <- data_wide %>%
+  group_by(Lake, Round) %>%              # Group by the classification column
+  summarize(
+    proportion_brood = mean(brood), # Calculate the proportion
+    total_ind=n()
+  )
+
+proportions_brood
+max(proportions_brood$proportion_brood)
+
+#micg
+proportions_micg <- data_wide %>%
+  group_by(Lake, Round) %>%              # Group by the classification column
+  summarize(
+    proportion_micg = mean(micg), # Calculate the proportion
+    total_ind=n()
+  )
+
+proportions_micg
+max(proportions_micg$proportion_micg)
+
+
+#sprite
+proportions_sprite <- data_wide %>%
+  group_by(Lake, Round) %>%              # Group by the classification column
+  summarize(
+    proportion_sprite = mean(sprite), # Calculate the proportion
+    total_ind=n()
+  )
+
+proportions_sprite
+max(proportions_sprite$proportion_sprite)
+
+
+#spiro
+proportions_spiro <- data_wide %>%
+  group_by(Lake, Round) %>%              # Group by the classification column
+  summarize(
+    proportion_spiro = mean(spiro), # Calculate the proportion
+    total_ind=n()
+  )
+
+proportions_spiro
+max(proportions_spiro$proportion_spiro)
+
+
+#now we are going to merge all of the data frames since they have three common columns
+#first make a list of all the data frames
+summary_dfs <- list(proportions_metsch, proportions_brood, proportions_past, proportions_micg,
+                    proportions_spiro, proportions_sprite)
+
+summary_data <- reduce (summary_dfs, full_join, by=c("Lake", "Round", "total_ind"))
+
+#print summary data
+summary_data
+
+```
+
+```{r, graphing_summary}
+#first, the data needs to be put into long format again 
+sum_long <- summary_data %>%
+  pivot_longer(
+    cols = starts_with("proportion"), 
+    names_to = "parasite", 
+    values_to = "proportion_li"
+  ) %>%
+#OK, now all the parasite names include "proportion", so remove that
+ mutate(parasite = str_remove(parasite, "^proportion_"))
+
+
+#make round a factor
+sum_long$Round <- factor(sum_long$Round, levels = unique(sum_long$Round))
+
+
+
+#make faceted graph across lakes
+# Create the faceted plot
+summary_all_plot <- ggplot(sum_long, aes(y = proportion_li, x = Round, color = parasite,
+                                         group=parasite)) +
+  geom_line(linetype=1) +
+  geom_point() +
+  facet_wrap(~ Lake, scales = "free_y") +
+  labs(
+    title = "Proportion Latent Infection all data",
+    x = "Round",
+    y = "proportion",
+    color = "Parasite"
+  ) +
+  scale_color_manual(values=color_palette_all)+
+  theme_minimal() +
+  theme(legend.position = "top")
+
+summary_all_plot
+ggsave("summary_li.png", plot = summary_all_plot, width = 6, height = 4, dpi = 600, bg="white")
+
+```
+
+Now, we have to filter the data more to exclude animals who died before we would reasonably be able to say that they STAYED uninfected. To do this, I am going to go back to the main data set, then filter animals which didn't die on day 4, then when I summarize the data set I will filter out any rounds which have less than 15 animals left to a round. 
+
+
+```{r, subsetting_alldata}
+#first, go back to the main data set and create a new column determining if animals died by day 4. 
+data_wide$ear_mort <- data_wide$D4=="dead"
+sum(data_wide$ear_mort) #the sum of this column is 1170, meaning that roughly a third of animals died on or before day 4 and will not be included in data analyses. :(
+
+
+#create a new main data frame that has all animals which lived past day 4
+filtered_data <-data_wide[data_wide$ear_mort==FALSE,]
+```
+
+Using the filtered data set, I have to calculate the percentages of animals that had infections and coinfections. This is across ALL animals, so I have not done the filtering which removes any rounds where there were less than 15 surviving animals. Subsetting by number of animals in each round will be done when summarizing by round. 
+```{r, calc_props_allanimals}
+#use rowSums to sum all TRUE/FALSE columns for presence of each individual parasite
+filtered_data$all_coinfs <- rowSums(filtered_data[,c("metsch","past","brood","spiro","micg","sprite")])
+
+#determine how many rows (ie individuals) have a sum greater or equal to 2, indicating the preesence of more than 1 parasite over 14 days either concurrently or independently. 
+
+unique(filtered_data$all_coinfs) #the maximum number of parasites in one ind is 2 
+
+#sum number of individuals with 2 parasites
+count_coinfs <- sum(filtered_data$all_coinfs==2)
+count_coinfs
+count_infs <- sum(filtered_data$all_coinfs>=1)
+count_infs
+count_uninfs <- sum(filtered_data$all_coinfs==0)
+count_uninfs
+#total length of data set (ie the total number of individuals is 3722
+total_ind <- 2552
+
+prop_inf <- count_infs/total_ind
+prop_inf
+prop_coinf <- count_coinfs/total_ind
+prop_coinf
+```
+
+```{r, summary_stats_figures}
+
+#determine proportion with metsch infections for each round   
+proportions_metsch <- filtered_data %>%
+  group_by(Lake, Round) %>%              # Group by the classification column
+  summarize(
+    proportion_metsch = mean(metsch),
+    total_ind=n()                        # Calculate the proportion
+  )
+
+proportions_metsch
+
+#past
+proportions_past <- filtered_data %>%
+  group_by(Lake, Round) %>%              # Group by the classification column
+  summarize(
+    proportion_past = mean(past), # Calculate the proportion
+    total_ind=n()
+  )
+
+proportions_past
+
+#brood
+proportions_brood <- filtered_data %>%
+  group_by(Lake, Round) %>%              # Group by the classification column
+  summarize(
+    proportion_brood = mean(brood), # Calculate the proportion
+    total_ind=n()
+  )
+
+proportions_metsch
+
+
+#micg
+proportions_micg <- filtered_data %>%
+  group_by(Lake, Round) %>%              # Group by the classification column
+  summarize(
+    proportion_micg = mean(micg), # Calculate the proportion
+    total_ind=n()
+  )
+
+proportions_micg
+
+
+#sprite
+proportions_sprite <- filtered_data %>%
+  group_by(Lake, Round) %>%              # Group by the classification column
+  summarize(
+    proportion_sprite = mean(sprite), # Calculate the proportion
+    total_ind=n()
+  )
+
+proportions_sprite
+
+
+#spiro
+proportions_spiro <- filtered_data %>%
+  group_by(Lake, Round) %>%              # Group by the classification column
+  summarize(
+    proportion_spiro = mean(spiro), # Calculate the proportion
+    total_ind=n()
+  )
+
+proportions_spiro
+
+
+#now we are going to merge all of the data frames since they have three common columns
+#first make a list of all the data frames
+summary_dfs <- list(proportions_metsch, proportions_brood, proportions_past, proportions_micg,
+                    proportions_spiro, proportions_sprite)
+
+summary_data_filt <- reduce (summary_dfs, full_join, by=c("Lake", "Round", "total_ind"))
+
+#print summary data
+summary_data_filt
+
+```
+
+
+
+```{r, sum_figures_filtered}
+
+#first, the data needs to be put into long format again 
+sum_long_filt <- summary_data_filt %>%
+  pivot_longer(
+    cols = starts_with("proportion"), 
+    names_to = "parasite", 
+    values_to = "proportion_li"
+  ) %>%
+#OK, now all the parasite names include "proportion", so remove that
+ mutate(parasite = str_remove(parasite, "^proportion_"))
+
+
+#make round a factor
+sum_long_filt$Round <- factor(sum_long_filt$Round, levels = unique(sum_long_filt$Round))
+
+#remove all rows of rounds with less than 15 animals
+sum_filtered <- sum_long_filt %>%
+  filter(total_ind >= 15)
+
+#rerun plot  
+summary_filt_plot <- ggplot(sum_filtered, aes(y = proportion_li, x = Round, color = parasite,
+                                              group=parasite)) +
+                          geom_line() +
+                          geom_point() +
+                          facet_wrap(~ Lake, scales = "free_y") +
+                          labs(
+                            title = "Proportion Latent Infection >= 15 animals",
+                            x = "Round",
+                            y = "Proportion",
+                            color = "Parasite"
+                          ) +
+                          scale_color_manual(values=color_palette_all)+
+                          theme_minimal() +
+                          theme(legend.position = "top")
+
+summary_filt_plot
+ggsave("summary_li_feb25.png", plot = summary_filt_plot, width = 6, height = 4, dpi = 600, bg="white")
+
+
+#organize differently, plots with parasites with line types as lakes
+sumplot_filt_para <- ggplot(sum_filtered, aes(y = proportion_li, x = Round, group = Lake,
+                                              color=parasite)) +
+                          geom_line(aes(linetype=Lake)) +
+                          geom_point() +
+                            facet_wrap(~ parasite, scales = "free_y") +
+                          labs(
+                            title = "Proportion Latent Infection by Parasite >=15 animals",
+                            x = "Round",
+                            y = "Proportion"
+                          ) +
+                          scale_color_manual(values=color_palette_all)+
+                          theme_minimal() +
+                          theme(legend.position = "top")
+
+sumplot_filt_para
+
+```
+
+```{r, sum_plot_manuscript}
+presets_spiro <- theme(panel.grid.minor=element_blank(),
+                 panel.grid.major=element_blank(),
+                 panel.background=element_rect(fill="transparent", colour = NA),
+                 plot.background=element_rect(fill="transparent", colour = NA),
+                 #panel.border=element_rect(colour = 'black', fill = NA, linewidth = 0.5),
+                 panel.border = element_blank(),
+                 axis.line = element_line(color="black"),
+                 axis.ticks=element_line(colour = 'black', linewidth = 0.5), 
+                 axis.text.x = element_text(family="sans", size=8, color="black"), 
+                 axis.text.y = element_text(family="sans", size=8, color="black"),
+                 strip.background = element_rect(fill = "gray90", colour = "black", linewidth = 0.5),
+                 strip.text = element_text(family="sans", size=12),
+                 plot.title = element_text(hjust = 0.5, vjust=-5, size=10, face="bold"),
+                 axis.title.y = element_text(margin = margin(t = 0, r = 20, b = 0, l = 0)),
+                 axis.title.x = element_text(margin = margin(t = 20, r = 0, b = 0, l = 0)))
+
+
+
+labels_scinames<- c("brood"="B.paedophthorum",
+                             "metsch"="A.monospora",
+                             "micg"="O.pajunii",
+                             "past"="P.ramosa",
+                             "spiro"="S.cienkowskii",
+                             "sprite"="P.perplexa")
+
+
+#assign scientific names to the parasites 
+summary_fig_data <- sum_filtered %>%
+  mutate(parasite = dplyr::recode(parasite, !!!labels_scinames))
+
+#create a new color palette which adheres to the new names
+color_palette_scinames <- c("Uninfected" = "springgreen", "S.cienkowskii" = "#ff4040", "O.pajunii" = "darkgoldenrod1",
+                   "P.perplexa"="chocolate1", "B.paedophthorum"="deeppink",  
+                   "P.ramosa"= "darkorchid1", "A.monospora"="#5CACEE", "unk"="gray50",
+                   "PP&BP"= "deeppink4", "PP&SC"="brown4",
+                   "PP&PR"="darkorchid4", "PP&AM"="cadetblue4",
+                   "PP&OP"="darkgoldenrod4","OP&PR"="deeppink3", "OP&unk"="gray40",
+                   "Dead"="black")
+
+
+
+presets <- theme(panel.grid.minor=element_blank(),
+                 panel.grid.major=element_blank(),
+                 panel.background=element_rect(fill="transparent", colour = NA),
+                 plot.background=element_rect(fill="transparent", colour = NA),
+                 panel.border=element_rect(colour = 'black', fill = NA, linewidth = 0.5),
+                 axis.line = element_blank(),
+                 axis.ticks=element_line(colour = 'black', linewidth = 0.5), 
+                 axis.text.x = element_text(family="sans", size=8, color="black"), 
+                 axis.text.y = element_text(family="sans", size=8, color="black"),
+                 strip.background = element_rect(fill = "gray90", colour = "black", linewidth = 0.5),
+                 strip.text = element_text(family="sans", size=12),
+                 plot.title = element_text(hjust = 0.5),
+                 axis.title.y = element_text(margin = margin(t = 0, r = 20, b = 0, l = 0)),
+                 axis.title.x = element_text(margin = margin(t = 20, r = 0, b = 0, l = 0)))
+
+#rerun the summary proportion latent infection >= 15 animals plot
+manuscript_summary <- ggplot(summary_fig_data, aes(y = proportion_li, x = Round, color = parasite,
+                                              group=parasite)) +
+                          geom_line() +
+                          geom_point() +
+                          facet_wrap(~ Lake, scales = "free_y") +
+                          labs(
+                            title = "",
+                            x = "Round",
+                            y = "Proportion",
+                            color = "Parasite"
+                          ) +
+                          scale_color_manual(values=color_palette_scinames)+
+                          theme_minimal() +
+                          theme(legend.position = "right")+
+                          presets
+
+
+manuscript_summary
+ggsave("summary_li_feb25.png", plot = summary_filt_plot, width = 6, height = 4, dpi = 600, bg="white")
+
+```
+
+Figure out confection using these nw summarized data. I think we can use new columns with values fo each type of infection to determine if there ar subsequent AND simultaneous coinfections. If I run a command that sums all of those columns together for each individual animal, any animal that has a sum greater than or equal to 2 was at some point infected by more than one type of parasite. 
+
+```{r, all_coinfections}
+#use rowSums to sum all TRUE/FALSE columns for presence of each individual parasite
+data_wide$all_coinfs <- rowSums(data_wide[,c("metsch","past","brood","spiro","micg","sprite")])
+
+#determine how many rows (ie individuals) have a sum greater or equal to 2, indicating the preesence of more than 1 parasite over 14 days either concurrently or independently. 
+
+unique(data_wide$all_coinfs) #the maximum number of parasites in one ind is 2 
+
+#sum number of individuals with 2 parasites
+count_coinfs <- sum(data_wide$all_coinfs==2)
+count_coinfs
+count_infs <- sum(data_wide$all_coinfs>=1)
+count_infs
+count_uninfs <- sum(data_wide$all_coinfs==0)
+count_uninfs
+#total length of data set (ie the total number of individuals is 3722
+total_ind <- 3722
+
+prop_inf <- count_infs/total_ind
+prop_inf
+prop_coinf <- count_coinfs/total_ind
+prop_coinf
+```
+___________________________________
+__________________________________
+____________________________________
+JOIN WITH PREVALENCE DATA
+
+
+
+```{r, readin_prev_data}
+#load in data
+prev_data <- read.csv(file="Clean-Data-2014-2024.csv", header=T)
+head(prev_data)
+unique(prev_data$Lake)
+
+#filter data to just 2024 and dentifera
+d2024 <- prev_data[prev_data$Year==2024&prev_data$Host.Species=="dentifera",]
+
+#filter to just the lakes we looked at for this project
+unique(d2024$Lake)
+prev <- d2024[d2024$Lake=="Walsh"|d2024$Lake=="Mill"|d2024$Lake=="Cedar"|
+                d2024$Lake=="CrookedW"|d2024$Lake=="Bishop"|d2024$Lake=="Sullivan",]
+unique(prev$Lake)
+```
+Ok now we have the prevalence data for all the lakes and dentifera, which includes the counts of the uninfected adults and juveniles separately. Our goal is to have the prevalence data for each parasite as well as an edited prevalence for each data point which applies the proportion of animals which had unapparent infections to the overall uninfected count. I think the easiest way to workshop this will be to separate out a single parasite and work on that.  
+
+```{r, prepping_prevdata}
+#create a new column in the prev data set with all the uninfected animals added together
+prev$Uninfected.All <- prev$Uninfected.Adult+prev$Uninfected.Ephip+prev$Uninfected.Juv+prev$Uninfected.Males
+
+#now we need to find a way to merge the two data sets
+#the prevalence data does not have round number included 
+#to add it in, match rounds to julian dates for each lake
+
+prev <- prev %>%
+  mutate(
+    Round = case_when(
+      Julian %in% c(198, 197, 204, 207) ~ 1,
+      Julian %in% c(213, 211, 218, 221) ~ 2,
+      Julian %in% c(227, 225, 232, 235) ~ 3,
+      Julian %in% c(241, 239, 247, 249) ~ 4,
+      Julian %in% c(255, 253, 260, 263) ~ 5,
+      Julian %in% c(269, 267, 274, 277) ~ 6,
+      Julian %in% c(283, 281, 288, 291) ~ 7,
+      Julian %in% c(297, 295, 302, 305) ~ 8,
+      Julian %in% c(311, 309, 316, 319) ~ 9,
+      TRUE ~ NA_integer_  # Optional: handles cases that don't match
+    )
+  )
+
+#CrookedW is not the same in both data sets so switch it
+prev <- prev %>%
+  mutate(Lake = case_when(
+    Lake == "CrookedW" ~ "Crooked",
+    TRUE ~ Lake
+  ))
+```
+
+
+
+```{r, sprite_figure}
+#Merge the proportions data set with the prevalence data set 
+sprite_prev <- full_join(prev, proportions_sprite, by = c("Lake", "Round"))
+
+#in the next step we are going to use the proportions data, but first we have to filter out any proportions calculated from less than 15 individuals
+#I am going to do this by making the proportion which presented infection 0 any time there were less than 15 individuals. 
+#I am doing this step on the already joined data which is probably redundant and not the most efficient way to do it
+sprite_prev
+sprite_prev <- sprite_prev %>%
+  mutate(proportion_sprite = if_else(total_ind < 15, 0, proportion_sprite))
+
+#Now we are going to do some basic math
+sprite_prev$est_numinf <- (sprite_prev$proportion_sprite*sprite_prev$Uninfected.All)+sprite_prev$coke.inf
+
+sprite_prev$est_overallprev <- sprite_prev$est_numinf/sprite_prev$Total
+
+#Now we need to filter out 
+
+#rename relevant columns
+sprite_prev <- sprite_prev %>%
+  rename(
+    visual_sprite = coke.prev,
+    overall_sprite = est_overallprev
+  )
+
+#now we need to pivot longer for the graph
+long_spriteprev <- sprite_prev %>% 
+    pivot_longer(cols = c(visual_sprite, overall_sprite),
+               names_to = "group",
+               values_to = "prevalence")
+
+#Trying to fix the problem with a subset of the graphs by removing any data that has NAs in the real prevalence but a 0 in the estimate (this is because there were sometimes that there were less than 20 animals processed but I collected more than that from my extra tows)
+long_spriteprev <- subset(long_spriteprev, Total>=20)
+
+
+#try explicitly stating the group column as a factor
+long_spriteprev$group <- factor(long_spriteprev$group, levels = c("visual_sprite", "overall_sprite"))
+
+
+#try plotting
+sprite_overall <-ggplot(long_spriteprev, aes(x = Round, y = prevalence, color = group, linetype=group)) +
+  geom_line() +
+  geom_point() +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 9)) +  # ensures integer breaks
+  scale_color_manual(values = c("visual_sprite" = "chocolate1", "overall_sprite" = "chocolate1"), guide="none") +
+  scale_linetype_manual(values = c("visual_sprite"=1, "overall_sprite"=2), name="") +
+  facet_wrap(~ Lake) +
+  theme_minimal() +
+  labs(title="Sprite Prevalence", x = "Round", y = "Prevalence", linetype = "Group")
+sprite_overall             
+```
+
+
+
+
+```{r, metsch_figure}
+#Merge the proportions data set with the prevalence data set 
+metsch_prev <- full_join(prev, proportions_metsch, by = c("Lake", "Round"))
+
+#filter out proportions with less than 15 animals
+metsch_prev
+metsch_prev <- metsch_prev %>%
+  mutate(proportion_metsch = if_else(total_ind < 15, 0, proportion_metsch))
+#Now we are going to do some basic math
+metsch_prev$est_numinf <- (metsch_prev$proportion_metsch*metsch_prev$Uninfected.All)+metsch_prev$metsch.inf
+
+metsch_prev$est_overallprev <- metsch_prev$est_numinf/metsch_prev$Total
+
+#rename relevant columns
+metsch_prev <- metsch_prev %>%
+  rename(
+    visual_metsch = metsch.prev,
+    overall_metsch = est_overallprev
+  )
+
+#now we need to pivot longer for the graph
+long_metschprev <- metsch_prev %>% 
+    pivot_longer(cols = c(visual_metsch, overall_metsch),
+               names_to = "group",
+               values_to = "prevalence")
+
+#Trying to fix the problem with a subset of the graphs by removing any data that has NAs in the real prevalence but a 0 in the estimate (this is because there were sometimes that there were less than 20 animals processed but I collected more than that from my extra tows)
+long_metschprev <- subset(long_metschprev, Total>=20)
+
+
+#try explicitly stating the group column as a factor
+long_metschprev$group <- factor(long_metschprev$group, levels = c("visual_metsch", "overall_metsch"))
+
+
+#try plotting
+metsch_overall <-ggplot(long_metschprev, aes(x = Round, y = prevalence, color = group, linetype=group)) +
+  geom_line() +
+  geom_point() +
+  scale_y_continuous(limits = c(0, 0.1)) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 9)) +  # ensures integer breaks
+  scale_color_manual(values = c("visual_metsch" = "cadetblue", "overall_metsch" = "cadetblue"), guide="none") +
+  scale_linetype_manual(values = c("visual_metsch"=1, "overall_metsch"=2), name="") +
+  facet_wrap(~ Lake) +
+  theme_minimal() +
+  labs(title="Metsch Prevalence", x = "Round", y = "Prevalence", linetype = "Group")
+
+metsch_overall             
+```
+
+```{r, past_figure}
+#Merge the proportions data set with the prevalence data set 
+past_prev <- full_join(prev, proportions_past, by = c("Lake", "Round"))
+
+#filter out proportions with less than 15 animals
+past_prev
+past_prev <- past_prev %>%
+  mutate(proportion_past = if_else(total_ind < 15, 0, proportion_past))
+
+#Now we are going to do some basic math
+past_prev$est_numinf <- (past_prev$proportion_past*past_prev$Uninfected.All)+past_prev$pasteuria.inf
+
+past_prev$est_overallprev <- past_prev$est_numinf/past_prev$Total
+
+#rename relevant columns
+past_prev <- past_prev %>%
+  rename(
+    visual_past = pasteuria.prev,
+    overall_past = est_overallprev
+  )
+
+#now we need to pivot longer for the graph
+long_pastprev <- past_prev %>% 
+    pivot_longer(cols = c(visual_past, overall_past),
+               names_to = "group",
+               values_to = "prevalence")
+
+#Trying to fix the problem with a subset of the graphs by removing any data that has NAs in the real prevalence but a 0 in the estimate (this is because there were sometimes that there were less than 20 animals processed but I collected more than that from my extra tows)
+long_pastprev <- subset(long_pastprev, Total>=20)
+
+#try explicitly stating the group column as a factor
+long_pastprev$group <- factor(long_pastprev$group, levels = c("visual_past", "overall_past"))
+
+
+#try plotting
+past_overall <-ggplot(long_pastprev, aes(x = Round, y = prevalence, color = group, linetype=group)) +
+  geom_line() +
+  geom_point() +
+  scale_y_continuous(limits = c(0, 0.3)) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 9)) +  # ensures integer breaks
+  scale_color_manual(values = c("visual_past" = "darkorchid1", "overall_past" = "darkorchid1"), guide="none") +
+  scale_linetype_manual(values = c("visual_past"=1, "overall_past"=2), name="") +
+  facet_wrap(~ Lake) +
+  theme_minimal() +
+  labs(title="past Prevalence", x = "Round", y = "Prevalence", linetype = "Group")
+  
+past_overall             
+```
+
+```{r, micg_figure}
+#Merge the proportions data set with the prevalence data set 
+micg_prev <- full_join(prev, proportions_micg, by = c("Lake", "Round"))
+
+#filter out proportions with less than 15 animals
+micg_prev
+micg_prev <- micg_prev %>%
+  mutate(proportion_micg = if_else(total_ind < 15, 0, proportion_micg))
+
+#Now we are going to do some basic math
+micg_prev$est_numinf <- (micg_prev$proportion_micg*micg_prev$Uninfected.All)+micg_prev$micG.inf
+
+micg_prev$est_overallprev <- micg_prev$est_numinf/micg_prev$Total
+
+#rename relevant columns
+micg_prev <- micg_prev %>%
+  rename(
+    visual_micg = micG.prev,
+    overall_micg = est_overallprev
+  )
+
+#now we need to pivot longer for the graph
+long_micgprev <- micg_prev %>% 
+    pivot_longer(cols = c(visual_micg, overall_micg),
+               names_to = "group",
+               values_to = "prevalence")
+
+#Trying to fix the problem with a subset of the graphs by removing any data that has NAs in the real prevalence but a 0 in the estimate (this is because there were sometimes that there were less than 20 animals processed but I collected more than that from my extra tows)
+long_micgprev <- subset(long_micgprev, Total>=20)
+
+#try explicitly stating the group column as a factor
+long_micgprev$group <- factor(long_micgprev$group, levels = c("visual_micg", "overall_micg"))
+
+
+#try plotting
+micg_overall <-ggplot(long_micgprev, aes(x = Round, y = prevalence, color = group, linetype=group)) +
+  geom_line() +
+  geom_point() +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 9)) +  # ensures integer breaks
+  scale_color_manual(values = c("visual_micg" = "darkgoldenrod1", "overall_micg" = "darkgoldenrod1"), guide="none") +
+  scale_linetype_manual(values = c("visual_micg"=1, "overall_micg"=2), name="") +
+  facet_wrap(~ Lake) +
+  theme_minimal() +
+  labs(title="micg Prevalence", x = "Round", y = "Prevalence", linetype = "Group")
+
+micg_overall             
+```
+
+
+```{r, spiro_figure}
+#Merge the proportions data set with the prevalence data set 
+spiro_prev <- full_join(prev, proportions_spiro, by = c("Lake", "Round"))
+
+#filter out proportions with less than 15 animals
+spiro_prev
+spiro_prev <- spiro_prev %>%
+  mutate(proportion_spiro = if_else(total_ind < 15, 0, proportion_spiro))
+
+#Now we are going to do some basic math
+spiro_prev$est_numinf <- (spiro_prev$proportion_spiro*spiro_prev$Uninfected.All)+spiro_prev$spiro.inf
+
+spiro_prev$est_overallprev <- spiro_prev$est_numinf/spiro_prev$Total
+
+#rename relevant columns
+spiro_prev <- spiro_prev %>%
+  rename(
+    visual_spiro = spiro.prev,
+    overall_spiro = est_overallprev
+  )
+
+#now we need to pivot longer for the graph
+long_spiroprev <- spiro_prev %>% 
+    pivot_longer(cols = c(visual_spiro, overall_spiro),
+               names_to = "group",
+               values_to = "prevalence")
+
+#Trying to fix the problem with a subset of the graphs by removing any data that has NAs in the real prevalence but a 0 in the estimate (this is because there were sometimes that there were less than 20 animals processed but I collected more than that from my extra tows)
+long_spiroprev <- subset(long_spiroprev, Total>=20)
+
+#try explicitly stating the group column as a factor
+long_spiroprev$group <- factor(long_spiroprev$group, levels = c("visual_spiro", "overall_spiro"))
+
+
+#try plotting
+spiro_overall <-ggplot(long_spiroprev, aes(x = Round, y = prevalence, color = group, linetype=group)) +
+  geom_line() +
+  geom_point() +
+  scale_y_continuous(limits = c(0, 0.1)) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 9)) +  # ensures integer breaks
+  scale_color_manual(values = c("visual_spiro" = "brown1", "overall_spiro" = "brown1"), guide="none") +
+  scale_linetype_manual(values = c("visual_spiro"=1, "overall_spiro"=2), name="") +
+  facet_wrap(~ Lake) +
+  theme_minimal() +
+  labs(title="spiro Prevalence", x = "Round", y = "Prevalence", linetype = "Group")
+
+spiro_overall             
+```
+
+```{r, brood_figure}
+#Merge the proportions data set with the prevalence data set 
+brood_prev <- full_join(prev, proportions_brood, by = c("Lake", "Round"))
+
+#filter out proportions with less than 15 animals
+brood_prev
+brood_prev <- brood_prev %>%
+  mutate(proportion_brood = if_else(total_ind < 15, 0, proportion_brood))
+
+#Now we are going to do some basic math
+brood_prev$est_numinf <- (brood_prev$proportion_brood*brood_prev$Uninfected.All)+brood_prev$brood.inf
+
+brood_prev$est_overallprev <- brood_prev$est_numinf/brood_prev$Total
+
+#rename relevant columns
+brood_prev <- brood_prev %>%
+  rename(
+    visual_brood = brood.prev,
+    overall_brood = est_overallprev
+  )
+
+#now we need to pivot longer for the graph
+long_broodprev <- brood_prev %>% 
+    pivot_longer(cols = c(visual_brood, overall_brood),
+               names_to = "group",
+               values_to = "prevalence")
+
+
+#Trying to fix the problem with a subset of the graphs by removing any data that has NAs in the real prevalence but a 0 in the estimate (this is because there were sometimes that there were less than 20 animals processed but I collected more than that from my extra tows)
+long_broodprev <- subset(long_broodprev, Total>=20)
+
+
+#try explicitly stating the group column as a factor
+long_broodprev$group <- factor(long_broodprev$group, levels = c("visual_brood", "overall_brood"))
+
+
+#try plotting
+brood_overall <-ggplot(long_broodprev, aes(x = Round, y = prevalence, color = group, linetype=group)) +
+  geom_line() +
+  geom_point() +
+  scale_y_continuous(limits = c(0, 0.1)) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 9)) +  # ensures integer breaks
+  scale_color_manual(values = c("visual_brood" = "deeppink", "overall_brood" = "deeppink"), guide="none") +
+  scale_linetype_manual(values = c("visual_brood"=1, "overall_brood"=2), name="") +
+  facet_wrap(~ Lake) +
+  theme_minimal() +
+  labs(title="brood Prevalence", x = "Round", y = "Prevalence", linetype = "Group")
+
+brood_overall             
+```
+
+
+
+
+color_palette_all <- c("u" = "springgreen", "spiro" = "brown1", "micg" = "darkgoldenrod1",
+                   "sprite"="chocolate1", "brood"="deeppink", 
+                   "past"= "darkorchid1", "metsch"="cadetblue1", "unk"="gray50",
+                   "sprite_brood"= "deeppink4", "sprite_spiro"="brown4",
+                   "sprite_past"="darkorchid4", "sprite_metsch"="cadetblue4",
+                   "sprite_micg"="darkgoldenrod4","micg_past"="deeppink3", "micg_unk"="gray40",
+                   "dead"="black")
+
+```{r, trial_calculate_percent_increase}
+#attempting to calculate average percent increase from visual infection to overall prevalence
+#try with sprite first 
+sprite_prev_diff <- sprite_prev
+
+#first, find the difference between visual and overall prevalence 
+sprite_prev_diff$difference <- sprite_prev_diff$overall_sprite-sprite_prev_diff$visual_sprite
+
+#filter out difference that are 0 
+sprite_prev_diff <- subset(sprite_prev_diff, !is.na(difference))
+
+mean_sprite<-mean(sprite_prev_diff$difference)
+n<-length(sprite_prev_diff)
+stdev<-sd(sprite_prev_diff$difference)
+se <- stdev/sqrt(n)
+mean
+se
+```
+```{r, trial_calculate_increase_micg}
+#attempting to calculate average percent increase from visual infection to overall prevalence
+#try with micg first 
+micg_prev_diff <- micg_prev
+
+#first, find the difference between visual and overall prevalence 
+micg_prev_diff$difference <- micg_prev_diff$overall_micg-micg_prev_diff$visual_micg
+
+#filter out difference that are 0 
+micg_prev_diff <- subset(micg_prev_diff, !is.na(difference))
+
+mean<-mean(micg_prev_diff$difference)
+n<-length(micg_prev_diff)
+stdev<-sd(micg_prev_diff$difference)
+se <- stdev/sqrt(n)
+mean
+se
+```
+```{r, trial_calculate_increase_brood}
+#attempting to calculate average percent increase from visual infection to overall prevalence
+#try with brood first 
+brood_prev_diff <- brood_prev
+
+#filter out for lakes that have at least one infected animal
+brood_prev_diff <- subset(brood_prev_diff, Lake %in% c("Walsh", "Cedar"))
+
+#first, find the difference between visual and overall prevalence 
+brood_prev_diff$difference <- brood_prev_diff$overall_brood-brood_prev_diff$visual_brood
+
+#filter out difference that are 0 
+brood_prev_diff <- subset(brood_prev_diff, !is.na(difference))
+
+mean<-mean(brood_prev_diff$difference)
+n<-length(brood_prev_diff)
+stdev<-sd(brood_prev_diff$difference)
+se <- stdev/sqrt(n)
+mean
+se
+```
+```{r, trial_calculate_increase_spiro}
+#attempting to calculate average percent increase from visual infection to overall prevalence
+#try with spiro first 
+spiro_prev_diff <- spiro_prev
+
+#filter out for lakes that have at least one infected animal
+spiro_prev_diff <- subset(spiro_prev_diff, Lake %in% c("Sullivan", "Mill", "Walsh", "Cedar"))
+
+
+#first, find the difference between visual and overall prevalence 
+spiro_prev_diff$difference <- spiro_prev_diff$overall_spiro-spiro_prev_diff$visual_spiro
+
+#filter out difference that are 0 
+spiro_prev_diff <- subset(spiro_prev_diff, !is.na(difference))
+
+mean<-mean(spiro_prev_diff$difference)
+n<-length(spiro_prev_diff)
+stdev<-sd(spiro_prev_diff$difference)
+se <- stdev/sqrt(n)
+mean
+se
+```
+```{r, trial_calculate_increase_past}
+#attempting to calculate average percent increase from visual infection to overall prevalence
+#try with past first 
+past_prev_diff <- past_prev
+
+#first, find the difference between visual and overall prevalence 
+past_prev_diff$difference <- past_prev_diff$overall_past-past_prev_diff$visual_past
+
+#filter out difference that are 0 
+past_prev_diff <- subset(past_prev_diff, !is.na(difference))
+
+mean<-mean(past_prev_diff$difference)
+n<-length(past_prev_diff)
+stdev<-sd(past_prev_diff$difference)
+se <- stdev/sqrt(n)
+mean
+se
+```
+```{r, trial_calculate_increase_metsch}
+#attempting to calculate average percent increase from visual infection to overall prevalence
+#try with metsch first 
+metsch_prev_diff <- metsch_prev
+
+#only keep lakes that had at least one infected animal
+metsch_prev_diff<-metsch_prev_diff[metsch_prev_diff$Lake=="Sullivan",]
+
+#first, find the difference between visual and overall prevalence 
+metsch_prev_diff$difference <- metsch_prev_diff$overall_metsch-metsch_prev_diff$visual_metsch
+
+#filter out difference that are 0 
+metsch_prev_diff <- subset(metsch_prev_diff, !is.na(difference))
+
+
+mean<-mean(metsch_prev_diff$difference)
+n<-length(metsch_prev_diff)
+stdev<-sd(metsch_prev_diff$difference)
+se <- stdev/sqrt(n)
+mean
+se
+```
+
+Work on figures for Tara. We are working with sprite, micg, metsch & brood on Cedar & Sullivan.
+
+```{r}
+#filter out Cedar & Sullivan for micg, metsch, sprite & brood
+plotdata_sprite <- subset(long_spriteprev, Lake %in% c("Cedar","Sullivan"))
+plotdata_micg <- subset(long_micgprev, Lake %in% c("Cedar","Sullivan"))
+plotdata_metsch <- subset(long_metschprev, Lake %in% c("Cedar","Sullivan"))
+plotdata_brood <- subset(long_broodprev, Lake %in% c("Cedar","Sullivan"))
+```
+
+Plot data using Tara's presets & general plan
+
+```{r}
+
+brood_overall <-ggplot(long_broodprev, aes(x = Round, y = prevalence, color = group, linetype=group)) +
+  geom_line() +
+  geom_point() +
+  scale_y_continuous(limits = c(0, 0.1)) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 9)) +  # ensures integer breaks
+  scale_color_manual(values = c("visual_brood" = "deeppink", "overall_brood" = "deeppink"), guide="none") +
+  scale_linetype_manual(values = c("visual_brood"=1, "overall_brood"=2), name="") +
+  facet_wrap(~ Lake) +
+  theme_minimal() +
+  labs(title="brood Prevalence", x = "Round", y = "Prevalence", linetype = "Group")
+#################
+# Figure presets
+#################
+
+presets <- theme(panel.grid.minor=element_blank(),
+                 panel.grid.major=element_blank(),
+                 panel.background=element_rect(fill="transparent", colour = NA),
+                 plot.background=element_rect(fill="transparent", colour = NA),
+                 panel.border=element_rect(colour = 'black', fill = NA, linewidth = 0.5),
+                 axis.line = element_blank(),
+                 axis.ticks=element_line(colour = 'black', linewidth = 0.5), 
+                 axis.text.x = element_text(family="sans", size=8, color="black"), 
+                 axis.text.y = element_text(family="sans", size=8, color="black"),
+                 strip.background = element_rect(fill = "gray90", colour = "black", linewidth = 0.5),
+                 strip.text = element_text(family="sans", size=12),
+                 plot.title = element_text(hjust = 0.5),
+                 axis.title.y = element_text(margin = margin(t = 0, r = 20, b = 0, l = 0)),
+                 axis.title.x = element_text(margin = margin(t = 20, r = 0, b = 0, l = 0)))
+
+############################
+# PANSPORELLA (SPRITE) PLOT
+############################
+
+####rename dataframe
+data <- plotdata_micg
+
+p1 <- ggplot() +
+  geom_area(data = subset(data, data$group == "overall_micg"), aes(x = Julian, y = prevalence), fill = "goldenrod", col = "black") +
+  geom_area(data = subset(data, data$group == "visual_micg"), aes(x = Julian, y = prevalence), fill = "lightgoldenrod1", col = "black") +
+  xlab("Sampling Date") +
+  ylab("Prevalence\n(proportion infected)") +
+  ylim(0, 0.4) +
+  facet_wrap(~Lake, scales="free_x") +
+  #scale_x_continuous(breaks = function(x)unique(x)) +
+  geom_hline(yintercept = 0.01, color = "black", linetype = "dashed")+
+  presets
+
+#pdf(file = "proposal_plots/Pansporella_draft.pdf",
+    #width = 6, # The width of the plot in inches
+   # height = 3) # The height of the plot in inches
+p1
+
+ggsave("Ordospora_draft.pdf", plot=p1, width=6, height=3, units="in")
+```
+Note to self: sprite is red4 and rosybrown1
+metsch is slateblue4 and lightslateblue3
+brood is darkolivegreen4 and darkolivegreen1
+micg is goldenrod and lightgoldenrod1
+
+
+
+
+roundnum <- unique(long_data$Round)
+
+#lake individual plots but with points instead
+cedar_tiles <- lapply(roundnum, function(round) {
+ggplot(cedar_all[cedar_all$Round==round,], aes(x = as.factor(check), y = Animal_ID)) +
+  geom_tile(aes(fill=cedar_all$INFSTATUS[cedar_all$Round==round]), color="grey20") +
+  scale_fill_manual(values=color_palette_all, name="Infection Status")+
+  labs(x = "Check", y = "", title = paste("Cedar infections over time in animals round", round)) +
+  theme_minimal()+theme(axis.text.y=element_blank())
+})
+
+
+
+#unlist plots
+# Define specific names for each plot
+plot_names <- c("sankey_sullivan1", "sankey_sullivan2", "sankey_sullivan3", "sankey_sullivan4", 
+                "sankey_sullivan5", "sankey_sullivan6", "sankey_sullivan7", "sankey_sullivan8",
+                "sankey_sullivan9")
+
+# Assign each plot in the list to the specified name
+for (i in seq_along(sullivan_sankeyplots)) {
+}
+sankey_sullivan1
+
+# Check the workspace to confirm
+ls()
+
+
+Create individual plots to for ggarrange later on.
+
+```{r, sprite_plots}
+#make a vector of unique names
+lakenames <- unique(long_spriteprev$Lake)
+lakenames
+
+#################
+# Figure presets
+#################
+
+presets <- theme(panel.grid.minor=element_blank(),
+                 panel.grid.major=element_blank(),
+                 panel.background=element_rect(fill="transparent", colour = NA),
+                 plot.background=element_rect(fill="transparent", colour = NA),
+                 #panel.border=element_rect(colour = 'black', fill = NA, linewidth = 0.5),
+                 panel.border = element_blank(),
+                 axis.line = element_line(color="black"),
+                 axis.ticks=element_line(colour = 'black', linewidth = 0.5), 
+                 axis.text.x = element_text(family="sans", size=8, color="black"), 
+                 axis.text.y = element_text(family="sans", size=8, color="black"),
+                 strip.background = element_rect(fill = "gray90", colour = "black", linewidth = 0.5),
+                 strip.text = element_text(family="sans", size=12),
+                 plot.title = element_text(hjust = 0.5, vjust=-8, size=10, face="bold"),
+                 axis.title.y = element_text(margin = margin(t = 0, r = 20, b = 0, l = 0)),
+                 axis.title.x = element_text(margin = margin(t = 20, r = 0, b = 0, l = 0)))
+
+
+
+####rename dataframe
+
+sprite_plots <- lapply(lakenames, function(lake) {
+  
+data <- subset(long_spriteprev, Lake==lake)
+
+ggplot() +
+  geom_area(data = subset(data, data$group == "overall_sprite"), aes(x = Julian, y = prevalence), fill = "#ff7f24", col = "black") +
+  geom_area(data = subset(data, data$group == "visual_sprite"), aes(x = Julian, y = prevalence), fill = "#ffd9bd", col = "black") +
+  ggtitle(bquote(.(lake) * ": " * italic("P. perplexa")))+
+    #annotate("text", 
+          # x = Inf, y = Inf, 
+          # label = paste(lake,": P. perplexa"), 
+           #hjust = 2.1, vjust = 1.5, 
+           #size = 5, fontface = "bold")+
+  xlab("") +
+  ylab("") +
+  ylim(0, 1) +
+  scale_x_continuous(breaks = c(197,218, 247, 277,309), labels=c("Jul", "Aug", "Sept", "Oct", "Nov")) +
+  geom_hline(yintercept = 0.01, color = "black", linetype = "dashed")+
+  presets
+})
+
+sprite_plots
+
+#unlist plots
+# Define specific names for each plot
+plot_names <- c("bishop_sprite", "cedar_sprite", "crooked_sprite", "mill_sprite", 
+                "sullivan_sprite", "walsh_sprite")
+
+# Assign each plot in the list to the specified name
+for (i in seq_along(sprite_plots)) {
+  assign(plot_names[i], sprite_plots[[i]])
+}
+bishop_sprite
+
+#now we have to annotate specifically bishop's sprite plot to say visible and overall infection in filled spaces
+bs_2 <-bishop_sprite+
+  annotate("text", 
+           x = 275, y = 0.12, 
+           label = "Visible Prevalence", 
+           #hjust = 1.1, vjust = 2, 
+           size = 2.5, fontface = "bold")+
+  annotate("text", 
+           x = 275, y = 0.42, 
+           label = "Estimated Overall Prevalence", 
+           #hjust = 1.1, vjust = 2, 
+           size = 2.5, fontface = "bold")
+  
+bs_2
+
+#
+
+#ggsave bishop sprite plot
+bs_3
+ggsave("bishop_perplexa.png", bs_2, width = 12, height = 8, dpi=600, bg="white")
+
+```
+
+```{r, micg_plots}
+#make a vector of unique names
+lakenames <- unique(long_micgprev$Lake)
+lakenames
+
+
+
+####rename dataframe
+
+micg_plots <- lapply(lakenames, function(lake) {
+  
+data <- subset(long_micgprev, Lake==lake)
+
+ggplot() +
+  geom_area(data = subset(data, data$group == "overall_micg"), aes(x = Julian, y = prevalence), fill = "goldenrod", col = "black") +
+  geom_area(data = subset(data, data$group == "visual_micg"), aes(x = Julian, y = prevalence), fill = "lightgoldenrod1", col = "black") +
+  ggtitle(bquote(.(lake) * ": " * italic("O. pajunii")))+
+  xlab("") +
+  ylab("") +
+  ylim(0, 0.6) +
+  scale_x_continuous(breaks = c(197,218, 247, 277,309), labels=c("Jul", "Aug", "Sept", "Oct", "Nov")) +
+  geom_hline(yintercept = 0.01, color = "black", linetype = "dashed")+
+  presets
+})
+
+micg_plots
+
+#unlist plots
+# Define specific names for each plot
+plot_names <- c("bishop_micg", "cedar_micg", "crooked_micg", "mill_micg", 
+                "sullivan_micg", "walsh_micg")
+
+# Assign each plot in the list to the specified name
+for (i in seq_along(micg_plots)) {
+  assign(plot_names[i], micg_plots[[i]])
+}
+bishop_micg
+
+```
+
+```{r, past_plots}
+#make a vector of unique names
+lakenames <- unique(long_pastprev$Lake)
+lakenames
+
+####rename dataframe
+
+past_plots <- lapply(lakenames, function(lake) {
+  
+data <- subset(long_pastprev, Lake==lake)
+
+ggplot() +
+  geom_area(data = subset(data, data$group == "overall_past"), aes(x = Julian, y = prevalence), fill = "#bf3eff", col = "black") +
+  geom_area(data = subset(data, data$group == "visual_past"), aes(x = Julian, y = prevalence), fill = "#ecc5ff", col = "black") +
+  ggtitle(bquote(.(lake) * ": " * italic("P. ramosa")))+
+  xlab("") +
+  ylab("") +
+  ylim(0, 0.3) +
+  scale_x_continuous(breaks = c(197,218, 247, 277,309), labels=c("Jul", "Aug", "Sept", "Oct", "Nov")) +
+  geom_hline(yintercept = 0.01, color = "black", linetype = "dashed")+
+  presets
+})
+
+past_plots
+
+#unlist plots
+# Define specific names for each plot
+plot_names <- c("bishop_past", "cedar_past", "crooked_past", "mill_past", 
+                "sullivan_past", "walsh_past")
+
+# Assign each plot in the list to the specified name
+for (i in seq_along(past_plots)) {
+  assign(plot_names[i], past_plots[[i]])
+}
+bishop_past
+
+```
+
+
+```{r, metsch_plots}
+#make a vector of unique names
+lakenames <- unique(long_metschprev$Lake)
+lakenames
+
+#################
+
+####rename dataframe
+
+metsch_plots <- lapply(lakenames, function(lake) {
+  
+data <- subset(long_metschprev, Lake==lake)
+
+ggplot() +
+  geom_area(data = subset(data, data$group == "overall_metsch"), aes(x = Julian, y = prevalence), fill = "#5CACEE", col = "black") +
+  geom_area(data = subset(data, data$group == "visual_metsch"), aes(x = Julian, y = prevalence), fill = "#cee6fa", col = "black") +
+  ggtitle(bquote(.(lake) * ": " * italic("A. monospora")))+
+  xlab("") +
+  ylab("") +
+  ylim(0, 0.075) +
+  scale_x_continuous(breaks = c(197,218, 247, 277,309), labels=c("Jul", "Aug", "Sept", "Oct", "Nov")) +
+  geom_hline(yintercept = 0.01, color = "black", linetype = "dashed")+
+  presets
+})
+
+metsch_plots
+
+#unlist plots
+# Define specific names for each plot
+plot_names <- c("bishop_metsch", "cedar_metsch", "crooked_metsch", "mill_metsch", 
+                "sullivan_metsch", "walsh_metsch")
+
+# Assign each plot in the list to the specified name
+for (i in seq_along(metsch_plots)) {
+  assign(plot_names[i], metsch_plots[[i]])
+}
+bishop_metsch
+
+```
+
+```{r, brood_plots}
+#make a vector of unique names
+lakenames <- unique(long_broodprev$Lake)
+lakenames
+
+#################
+
+####rename dataframe
+
+brood_plots <- lapply(lakenames, function(lake) {
+  
+data <- subset(long_broodprev, Lake==lake)
+
+ggplot() +
+  geom_area(data = subset(data, data$group == "overall_brood"), aes(x = Julian, y = prevalence), fill = "#ff1293", col = "black") +
+  geom_area(data = subset(data, data$group == "visual_brood"), aes(x = Julian, y = prevalence), fill = "#ffb8df", col = "black") +
+  ggtitle(bquote(.(lake) * ": " * italic("B. paedophthorum")))+
+  xlab("") +
+  ylab("") +
+  ylim(0, 0.075) +
+  scale_x_continuous(breaks = c(197,218, 247, 277,309), labels=c("Jul", "Aug", "Sept", "Oct", "Nov")) +
+  geom_hline(yintercept = 0.01, color = "black", linetype = "dashed")+
+  presets
+})
+
+brood_plots
+
+#unlist plots
+# Define specific names for each plot
+plot_names <- c("bishop_brood", "cedar_brood", "crooked_brood", "mill_brood", 
+                "sullivan_brood", "walsh_brood")
+
+# Assign each plot in the list to the specified name
+for (i in seq_along(brood_plots)) {
+  assign(plot_names[i], brood_plots[[i]])
+}
+bishop_brood
+
+```
+
+```{r, spiro_plots}
+#make a vector of unique names
+lakenames <- unique(long_spiroprev$Lake)
+lakenames
+
+
+#################
+# Figure presets
+#################
+
+presets_spiro <- theme(panel.grid.minor=element_blank(),
+                 panel.grid.major=element_blank(),
+                 panel.background=element_rect(fill="transparent", colour = NA),
+                 plot.background=element_rect(fill="transparent", colour = NA),
+                 #panel.border=element_rect(colour = 'black', fill = NA, linewidth = 0.5),
+                 panel.border = element_blank(),
+                 axis.line = element_line(color="black"),
+                 axis.ticks=element_line(colour = 'black', linewidth = 0.5), 
+                 axis.text.x = element_text(family="sans", size=8, color="black"), 
+                 axis.text.y = element_text(family="sans", size=8, color="black"),
+                 strip.background = element_rect(fill = "gray90", colour = "black", linewidth = 0.5),
+                 strip.text = element_text(family="sans", size=12),
+                 plot.title = element_text(hjust = 0.5, vjust=-5, size=10, face="bold"),
+                 axis.title.y = element_text(margin = margin(t = 0, r = 20, b = 0, l = 0)),
+                 axis.title.x = element_text(margin = margin(t = 20, r = 0, b = 0, l = 0)))
+
+####rename dataframe
+
+spiro_plots <- lapply(lakenames, function(lake) {
+  
+data <- subset(long_spiroprev, Lake==lake)
+
+ggplot() +
+  geom_area(data = subset(data, data$group == "overall_spiro"), aes(x = Julian, y = prevalence), fill = "#ff4040", col = "black") +
+  geom_area(data = subset(data, data$group == "visual_spiro"), aes(x = Julian, y = prevalence), fill = "#ffc6c6", col = "black") +
+   ggtitle(bquote(.(lake) * ": " * italic("S. cienkowskii")))+
+  xlab("") +
+  ylab("") +
+  ylim(0, 0.1) +
+  scale_x_continuous(breaks = c(197,218, 247, 277,309), labels=c("Jul", "Aug", "Sept", "Oct", "Nov")) +
+  geom_hline(yintercept = 0.01, color = "black", linetype = "dashed")+
+  presets_spiro
+})
+
+spiro_plots
+
+#unlist plots
+# Define specific names for each plot
+plot_names <- c("bishop_spiro", "cedar_spiro", "crooked_spiro", "mill_spiro", 
+                "sullivan_spiro", "walsh_spiro")
+
+# Assign each plot in the list to the specified name
+for (i in seq_along(spiro_plots)) {
+  assign(plot_names[i], spiro_plots[[i]])
+}
+bishop_spiro
+
+
+
+#unique(plotdata_spiro$Julian)
+```
+
+Now that we have all the plots we need to arrange them.
+Following is a list of all the lake/parasite plot combos that show an outbreak.
+
+Sprite: All 6
+MicG: All 6
+Past: All 6 
+Sprio: Bishop, Cedar, Sullivan, Walsh
+Brood: cedar, Walsh
+Metsch: Sullivan
+
+Ok, now we just have to try arranging plots; we can go back and make them more appropirate for ggarrange later.
+Edit: GGarrange roughly works to our vision; now we need to edit the individual plots to be much more comprehensible when reading as subplots in this megaplot
+
+```{r, megaplotting}
+#first, generate a blank plot that can be inserted for spacing
+blank_plot <- ggplot() +
+  theme_void()
+blank_plot
+
+#next, we create a specific order list to input into ggarrange
+
+megaplot <-ggarrange(bishop_sprite, cedar_sprite, crooked_sprite, mill_sprite, sullivan_sprite, walsh_sprite,
+          bishop_micg, cedar_micg, crooked_micg, mill_micg, sullivan_micg, walsh_micg,
+          bishop_past, cedar_past, crooked_past, mill_past, sullivan_past, walsh_past,
+          bishop_spiro, cedar_spiro, sullivan_spiro, walsh_spiro, blank_plot, blank_plot,
+          cedar_brood, walsh_brood, blank_plot, blank_plot, blank_plot, blank_plot,
+          sullivan_metsch, blank_plot, blank_plot, blank_plot, blank_plot, blank_plot,
+          ncol=6, nrow=6)
+
+megaplot <-annotate_figure(megaplot,
+                left = text_grob("Prevalence (Proportion infected)", 
+                                 rot = 90, vjust = 1, size = 24))
+
+megaplot
+ggsave("test_plot2.pdf", megaplot, width = 20, height = 15)
+
+
+#ggarrange option 2 
+megaplot2 <-ggarrange(bishop_sprite, cedar_sprite, crooked_sprite, mill_sprite, sullivan_sprite, walsh_sprite,
+          bishop_micg, cedar_micg, crooked_micg, mill_micg, sullivan_micg, walsh_micg,
+          bishop_past, cedar_past, crooked_past, mill_past, sullivan_past, walsh_past,
+          bishop_spiro, cedar_spiro, sullivan_spiro, walsh_spiro, blank_plot, blank_plot,
+          sullivan_metsch, cedar_brood, walsh_brood, blank_plot, blank_plot, blank_plot,
+          ncol=6, nrow=5)
+
+megaplot2 <-annotate_figure(megaplot2,
+                            
+                left = text_grob("Prevalence (Proportion infected)", 
+                                 rot = 90, vjust = 1, size = 24))
+
+ggsave("test_plot3.pdf", megaplot2, width = 20, height = 15)
+
+
+#try using grid.arrange instead
+plot_list <- list(
+  bs_2, cedar_sprite, crooked_sprite, mill_sprite, sullivan_sprite, walsh_sprite,
+  bishop_micg, cedar_micg, crooked_micg, mill_micg, sullivan_micg, walsh_micg,
+  bishop_past, cedar_past, crooked_past, mill_past, sullivan_past, walsh_past,
+  bishop_spiro, cedar_spiro, sullivan_spiro, walsh_spiro, blank_plot, blank_plot,
+  sullivan_metsch, cedar_brood, walsh_brood, blank_plot, blank_plot, blank_plot
+)
+
+#try to reduce margins across all plots
+plot_list <- lapply(plot_list, function(p) {
+  p + theme(plot.margin = margin(0.5, 0.5, 0.5, 0.5))  # in points
+})
+
+# Use do.call to pass the list into grid.arrange
+megaplot2 <- do.call(grid.arrange, c(plot_list, ncol = 6, nrow = 5))
+
+ggsave("test_plot7.pdf", megaplot2, width = 20, height = 15)
+library(gridExtra)
+library(grid)
+
+
+megaplot4 <- grid.arrange(
+  arrangeGrob(grobs = plot_list, ncol = 6, nrow = 5),
+  left = textGrob("Parasite Prevalence (Proportion Infected)", rot = 90, gp = gpar(fontsize = 14))
+)
+ggsave("test_plot15.pdf", megaplot4, width = 20, height = 15)
+ggsave("megaplot_draft.png", megaplot4, width = 12, height = 8, dpi=600, bg="white")
+
+```
+
+########################################
+########################################
+########################################
+########################################
+########################################
+Now we are going to adjust the presentation so that it is more ecologically relevant; to do this we are going show the total areal density, then show the number of visibly infected animals and the total infection load. To do this, we are going to calculate the visible prevalence and the total prevalence by the areal density of dentifera (the areal density was previously calculated when the field data was cleaned and should be verified.)
+
+```{r, areal_density}
+#starting with sprite
+#first, multiply the prevalence of visible prevalence by areal density
+#first, filter out any row with less than 20 observations in the field data 
+sprite_prev <- subset(sprite_prev, Total>=20) #filters out 5 dates total
+
+#now calculate the areal density of visibly infected and totally infected animals
+sprite_prev$areal_visinfs <- sprite_prev$visual_sprite*sprite_prev$Host.Density
+#calculate total estimated infections
+sprite_prev$areal_allinfs <- sprite_prev$overall_sprite*sprite_prev$Host.Density
+
+#continue with all parasites
+#micg
+micg_prev <- subset(micg_prev, Total>=20) #filters out 5 dates total
+
+#now calculate the areal density of visibly infected and totally infected animals
+micg_prev$areal_visinfs <- micg_prev$visual_micg*micg_prev$Host.Density
+#calculate total estimated infections
+micg_prev$areal_allinfs <- micg_prev$overall_micg*micg_prev$Host.Density
+
+#past
+past_prev <- subset(past_prev, Total>=20) #filters out 5 dates total
+
+#now calculate the areal density of visibly infected and totally infected animals
+past_prev$areal_visinfs <- past_prev$visual_past*past_prev$Host.Density
+#calculate total estimated infections
+past_prev$areal_allinfs <- past_prev$overall_past*past_prev$Host.Density
+
+#spiro
+spiro_prev <- subset(spiro_prev, Total>=20) #filters out 5 dates total
+
+#now calculate the areal density of visibly infected and totally infected animals
+spiro_prev$areal_visinfs <- spiro_prev$visual_spiro*spiro_prev$Host.Density
+#calculate total estimated infections
+spiro_prev$areal_allinfs <- spiro_prev$overall_spiro*spiro_prev$Host.Density
+
+#brood
+brood_prev <- subset(brood_prev, Total>=20) #filters out 5 dates total
+
+#now calculate the areal density of visibly infected and totally infected animals
+brood_prev$areal_visinfs <- brood_prev$visual_brood*brood_prev$Host.Density
+#calculate total estimated infections
+brood_prev$areal_allinfs <- brood_prev$overall_brood*brood_prev$Host.Density
+
+#metsch
+metsch_prev <- subset(metsch_prev, Total>=20) #filters out 5 dates total
+
+#now calculate the areal density of visibly infected and totally infected animals
+metsch_prev$areal_visinfs <- metsch_prev$visual_metsch*metsch_prev$Host.Density
+#calculate total estimated infections
+metsch_prev$areal_allinfs <- metsch_prev$overall_metsch*metsch_prev$Host.Density
+
+```
+
+```{r, figure_presets}
+#################
+# Figure presets
+#################
+
+presets <- theme(panel.grid.minor=element_blank(),
+                 panel.grid.major=element_blank(),
+                 panel.background=element_rect(fill="transparent", colour = NA),
+                 plot.background=element_rect(fill="transparent", colour = NA),
+                 #panel.border=element_rect(colour = 'black', fill = NA, linewidth = 0.5),
+                 panel.border = element_blank(),
+                 axis.line = element_line(color="black"),
+                 axis.ticks=element_line(colour = 'black', linewidth = 0.5), 
+                 axis.text.x = element_text(family="sans", size=8, color="black"), 
+                 axis.text.y = element_text(family="sans", size=8, color="black"),
+                 strip.background = element_rect(fill = "gray90", colour = "black", linewidth = 0.5),
+                 strip.text = element_text(family="sans", size=12),
+                 plot.title = element_text(hjust = 0.5, vjust=-8, size=10, face="bold"),
+                 axis.title.y = element_text(margin = margin(t = 0, r = 20, b = 0, l = 0)),
+                 axis.title.x = element_text(margin = margin(t = 20, r = 0, b = 0, l = 0)))
+
+```
+
+```{r, sprite_plotting_with_density}
+#using the same basic principles as the graphs above, but include black line with total density if that's possible
+#first pivot longer
+long_spritedensity <- sprite_prev %>% 
+    pivot_longer(cols = c(areal_visinfs, areal_allinfs),
+               names_to = "group",
+               values_to = "density")
+
+#figure out the maximum value for y limits
+max(long_spritedensity$Host.Density)
+#make a vector of unique names
+lakenames <- unique(long_spritedensity$Lake)
+lakenames
+
+
+####rename dataframe
+
+sprite_densityplots <- lapply(lakenames, function(lake) {
+  
+data <- subset(long_spritedensity, Lake==lake)
+
+ggplot() +
+  geom_area(data = subset(data, data$group == "areal_allinfs"), aes(x = Julian, y = density), fill = "#ff7f24", col = "black") +
+  geom_area(data = subset(data, data$group == "areal_visinfs"), aes(x = Julian, y = density), fill = "#ffd9bd", col = "black") +
+  geom_line(data=data, aes(x=Julian,y=Host.Density), color="black", linewidth=1)+
+  ggtitle(bquote(.(lake) * ": " * italic("P. perplexa")))+
+    #annotate("text", 
+          # x = Inf, y = Inf, 
+          # label = paste(lake,": P. perplexa"), 
+           #hjust = 2.1, vjust = 1.5, 
+           #size = 5, fontface = "bold")+
+  xlab("") +
+  ylab("") +
+  ylim(0, 86000) +
+  scale_x_continuous(breaks = c(197,218, 247, 277,309), labels=c("Jul", "Aug", "Sept", "Oct", "Nov")) +
+  #geom_hline(yintercept = 0.01, color = "black", linetype = "dashed")+
+  presets
+})
+
+sprite_densityplots
+
+#unlist plots
+# Define specific names for each plot
+plot_names <- c("bishop_sprite", "cedar_sprite", "crooked_sprite", "mill_sprite", 
+                "sullivan_sprite", "walsh_sprite")
+
+
+#THIS IS FOR LATER MEGAPLOTTING
+# Assign each plot in the list to the specified name
+#for (i in seq_along(sprite_plots)) {
+#  assign(plot_names[i], sprite_plots[[i]])
+#}
+#bishop_sprite
+
+```
+
+```{r, micg_plotting_with_density}
+#using the same basic principles as the graphs above, but include black line with total density if that's possible
+#first pivot longer
+long_micgdensity <- micg_prev %>% 
+    pivot_longer(cols = c(areal_visinfs, areal_allinfs),
+               names_to = "group",
+               values_to = "density")
+
+#figure out the maximum value for y limits
+max(long_micgdensity$Host.Density)
+#make a vector of unique names
+lakenames <- unique(long_micgdensity$Lake)
+lakenames
+
+
+####rename dataframe
+
+micg_densityplots <- lapply(lakenames, function(lake) {
+  
+data <- subset(long_micgdensity, Lake==lake)
+
+ggplot() +
+  geom_area(data = subset(data, data$group == "areal_allinfs"), aes(x = Julian, y = density), fill = "goldenrod", col = "black") +
+  geom_area(data = subset(data, data$group == "areal_visinfs"), aes(x = Julian, y = density), fill = "lightgoldenrod1", col = "black") +
+  geom_line(data=data, aes(x=Julian,y=Host.Density), color="black", linewidth=1)+
+  ggtitle(bquote(.(lake) * ": " * italic("P. perplexa")))+
+    #annotate("text", 
+          # x = Inf, y = Inf, 
+          # label = paste(lake,": P. perplexa"), 
+           #hjust = 2.1, vjust = 1.5, 
+           #size = 5, fontface = "bold")+
+  xlab("") +
+  ylab("") +
+  ylim(0, 86000) +
+  scale_x_continuous(breaks = c(197,218, 247, 277,309), labels=c("Jul", "Aug", "Sept", "Oct", "Nov")) +
+  #geom_hline(yintercept = 0.01, color = "black", linetype = "dashed")+
+  presets
+})
+
+micg_densityplots
+
+#unlist plots
+# Define specific names for each plot
+plot_names <- c("bishop_micg", "cedar_micg", "crooked_micg", "mill_micg", 
+                "sullivan_micg", "walsh_micg")
+
+
+#THIS IS FOR LATER MEGAPLOTTING
+# Assign each plot in the list to the specified name
+#for (i in seq_along(micg_plots)) {
+#  assign(plot_names[i], micg_plots[[i]])
+#}
+#bishop_micg
+
+```
+
+```{r, past_plotting_with_density}
+#using the same basic principles as the graphs above, but include black line with total density if that's possible
+#first pivot longer
+long_pastdensity <- past_prev %>% 
+    pivot_longer(cols = c(areal_visinfs, areal_allinfs),
+               names_to = "group",
+               values_to = "density")
+
+#figure out the maximum value for y limits
+max(long_pastdensity$Host.Density)
+#make a vector of unique names
+lakenames <- unique(long_pastdensity$Lake)
+lakenames
+
+
+####rename dataframe
+
+past_densityplots <- lapply(lakenames, function(lake) {
+  
+data <- subset(long_pastdensity, Lake==lake)
+
+ggplot() +
+  geom_area(data = subset(data, data$group == "areal_allinfs"), aes(x = Julian, y = density), fill = "#bf3eff", col = "black") +
+  geom_area(data = subset(data, data$group == "areal_visinfs"), aes(x = Julian, y = density), fill = "#ecc5ff", col = "black") +
+  geom_line(data=data, aes(x=Julian,y=Host.Density), color="black", linewidth=1)+
+  ggtitle(bquote(.(lake) * ": " * italic("P. perplexa")))+
+    #annotate("text", 
+          # x = Inf, y = Inf, 
+          # label = paste(lake,": P. perplexa"), 
+           #hjust = 2.1, vjust = 1.5, 
+           #size = 5, fontface = "bold")+
+  xlab("") +
+  ylab("") +
+  ylim(0, 86000) +
+  scale_x_continuous(breaks = c(197,218, 247, 277,309), labels=c("Jul", "Aug", "Sept", "Oct", "Nov")) +
+  #geom_hline(yintercept = 0.01, color = "black", linetype = "dashed")+
+  presets
+})
+
+past_densityplots
+
+#unlist plots
+# Define specific names for each plot
+plot_names <- c("bishop_past", "cedar_past", "crooked_past", "mill_past", 
+                "sullivan_past", "walsh_past")
+
+
+#THIS IS FOR LATER MEGAPLOTTING
+# Assign each plot in the list to the specified name
+#for (i in seq_along(past_plots)) {
+#  assign(plot_names[i], past_plots[[i]])
+#}
+#bishop_past
+
+```
+
+```{r, spiro_plotting_with_density}
+#using the same basic principles as the graphs above, but include black line with total density if that's possible
+#first pivot longer
+long_spirodensity <- spiro_prev %>% 
+    pivot_longer(cols = c(areal_visinfs, areal_allinfs),
+               names_to = "group",
+               values_to = "density")
+
+#figure out the maximum value for y limits
+max(long_spirodensity$Host.Density)
+#make a vector of unique names
+lakenames <- unique(long_spirodensity$Lake)
+lakenames
+
+
+####rename dataframe
+
+spiro_densityplots <- lapply(lakenames, function(lake) {
+  
+data <- subset(long_spirodensity, Lake==lake)
+
+ggplot() +
+  geom_area(data = subset(data, data$group == "areal_allinfs"), aes(x = Julian, y = density), fill = "#ff4040", col = "black") +
+  geom_area(data = subset(data, data$group == "areal_visinfs"), aes(x = Julian, y = density), fill = "#ffc6c6", col = "black") +
+  geom_line(data=data, aes(x=Julian,y=Host.Density), color="black", linewidth=1)+
+  ggtitle(bquote(.(lake) * ": " * italic("P. perplexa")))+
+    #annotate("text", 
+          # x = Inf, y = Inf, 
+          # label = spiroe(lake,": P. perplexa"), 
+           #hjust = 2.1, vjust = 1.5, 
+           #size = 5, fontface = "bold")+
+  xlab("") +
+  ylab("") +
+  ylim(0, 86000) +
+  scale_x_continuous(breaks = c(197,218, 247, 277,309), labels=c("Jul", "Aug", "Sept", "Oct", "Nov")) +
+  #geom_hline(yintercept = 0.01, color = "black", linetype = "dashed")+
+  presets
+})
+
+spiro_densityplots
+
+#unlist plots
+# Define specific names for each plot
+plot_names <- c("bishop_spiro", "cedar_spiro", "crooked_spiro", "mill_spiro", 
+                "sullivan_spiro", "walsh_spiro")
+
+
+#THIS IS FOR LATER MEGAPLOTTING
+# Assign each plot in the list to the specified name
+#for (i in seq_along(spiro_plots)) {
+#  assign(plot_names[i], spiro_plots[[i]])
+#}
+#bishop_spiro
+
+```
+
+########################################
+########################################
+########################################
+########################################
+########################################
+
+Calculate 
+
+
+
+########################################
+########################################
+########################################
+########################################
+########################################
+
+Calculate area under the curve
+```{r}
+#to trial calculations, isolate one lake and one parasite
+#bishop pansporellas
+bishop_sprite <- subset(sprite_prev, Lake=="Bishop")
+
+
+
+# Install and load the pracma package if needed
+library(pracma)
+
+
+# Calculate area under the curve
+class(bishop_sprite$Julian)
+bishop_sprite$Julian <-as.numeric(bishop_sprite$Julian)
+auc_bishopsprite <- trapz(bishop_sprite$Julian,bishop_sprite$overall_sprite)
+auc_bishopsprite <- trapz(bishop_sprite$Julian,bishop_sprite$visual_sprite)
+
+print(auc_bishopsprite)
+
+
+#sprite
+auc_sprite <- sprite_prev %>%
+  group_by(Lake) %>%
+  filter(!is.na(overall_sprite)& !is.na(visual_sprite)) %>%
+  filter(n()>=2)%>%
+  summarise(
+    AUC_visual = trapz(as.numeric(Julian), as.numeric(visual_sprite)),
+    AUC_overall = trapz(as.numeric(Julian), as.numeric(overall_sprite))
+  )
+
+auc_sprite$difference <- auc_sprite$AUC_overall-auc_sprite$AUC_visual
+auc_sprite$Parasite <- "sprite"
+
+#micg
+auc_micg <- micg_prev %>%
+  group_by(Lake) %>%
+  filter(!is.na(overall_micg)& !is.na(visual_micg)) %>%
+  filter(n()>=2)%>%
+  summarise(
+    AUC_visual = trapz(as.numeric(Julian), as.numeric(visual_micg)),
+    AUC_overall = trapz(as.numeric(Julian), as.numeric(overall_micg))
+  )
+
+
+auc_micg$difference <- auc_micg$AUC_overall-auc_micg$AUC_visual
+auc_micg$Parasite <- "micg"
+
+#past
+auc_past <- past_prev %>%
+  group_by(Lake) %>%
+  filter(!is.na(overall_past)& !is.na(visual_past)) %>%
+  filter(n()>=2)%>%
+  summarise(
+    AUC_visual = trapz(as.numeric(Julian), as.numeric(visual_past)),
+    AUC_overall = trapz(as.numeric(Julian), as.numeric(overall_past))
+  )
+
+
+auc_past$difference <- auc_past$AUC_overall-auc_past$AUC_visual
+auc_past$Parasite <- "past"
+
+#spiro
+auc_spiro <- spiro_prev %>%
+  group_by(Lake) %>%
+  filter(Lake %in% c("Bishop", "Cedar", "Sullivan", "Walsh")) %>%
+  filter(!is.na(overall_spiro)& !is.na(visual_spiro)) %>%
+  filter(n()>=2)%>%
+  summarise(
+    AUC_visual = trapz(as.numeric(Julian), as.numeric(visual_spiro)),
+    AUC_overall = trapz(as.numeric(Julian), as.numeric(overall_spiro))
+  )
+
+
+auc_spiro$difference <- auc_spiro$AUC_overall-auc_spiro$AUC_visual
+auc_spiro$Parasite <- "spiro"
+
+#brood
+auc_brood <- brood_prev %>%
+  group_by(Lake) %>%
+  filter(Lake %in% c("Cedar", "Walsh")) %>%
+  filter(!is.na(overall_brood)& !is.na(visual_brood)) %>%
+  filter(n()>=2)%>%
+  summarise(
+    AUC_visual = trapz(as.numeric(Julian), as.numeric(visual_brood)),
+    AUC_overall = trapz(as.numeric(Julian), as.numeric(overall_brood))
+  )
+
+
+auc_brood$difference <- auc_brood$AUC_overall-auc_brood$AUC_visual
+auc_brood$Parasite <- "brood"
+
+#metsch
+auc_metsch <- metsch_prev %>%
+  group_by(Lake) %>%
+  filter(Lake %in% c("Sullivan")) %>%
+  filter(!is.na(overall_metsch)& !is.na(visual_metsch)) %>%
+  filter(n()>=2)%>%
+  summarise(
+    AUC_visual = trapz(as.numeric(Julian), as.numeric(visual_metsch)),
+    AUC_overall = trapz(as.numeric(Julian), as.numeric(overall_metsch))
+  )
+
+
+auc_metsch$difference <- auc_metsch$AUC_overall-auc_metsch$AUC_visual
+auc_metsch$Parasite <- "metsch"
+
+
+#bind all auc values together
+auc_all <- bind_rows(auc_sprite,auc_micg,auc_past,auc_brood,auc_spiro,auc_metsch)
+
+#calculate percent increases and average
+auc_all$percentincrease <- (auc_all$difference/auc_all$AUC_visual)*100
+
+#normalized AUC instead of percent increase
+auc_all$relativediff <- auc_all$difference/auc_all$AUC_overall
+
+
+#summarize these data again for potential figure 
+
+
+
+ggplot(auc_all, aes(x = Parasite, y = difference, fill = Lake)) +
+  geom_col(position = position_dodge()) +
+  labs(title = "Difference between overall and visible AUC across parasites",
+       y = "AUC_overall -AUC_visible",
+       x = "") +
+  theme_minimal()
+
+
+ggplot(auc_all, aes(x = Parasite, y = relativediff)) +
+  geom_violin(fill = "lightblue") +
+  geom_jitter(width = 0.2, alpha = 0.6) +
+  ylab("(AUC_overall-AUC_visible)/AUC_overall") +
+  scale_y_continuous() +
+  presets
+
+
+#make this better using the parasite's colors
+#create custom color palettes with the lighter and darker values used in the summary figure
+colors_parasites_dark <- c("spiro"="#ff4040","brood"="#ff1293","metsch"="#5cacee","past"="#bf3eff",
+                           "micg"="goldenrod","sprite"="#ff7f24")
+colors_parasites_light <- c("spiro"="#ffc6c6","brood"="#ffb8df","metsch"="#cee6fa","past"="#ecc5ff",
+                            "micg"="lightgoldenrod1","sprite"="#ffd9bd")
+
+#plot using custom palettes for teh points and violin
+library(ggnewscale)
+
+
+#create new axis label names in italics
+labels_parasite_italics <- c("brood"="B.paedophthorum",
+                             "metsch"="A.monospora",
+                             "micg"="O.pajunii",
+                             "past"="P.ramosa",
+                             "spiro"="S.cienkowsii",
+                             "sprite"="P.perplexa")
+
+
+
+#this will be overlaying two fill types, so use different data for the points and the violins
+# Original data
+df_violin <- auc_all
+df_points <- auc_all
+
+
+# violin plot
+AUC_fig <-ggplot() +
+  geom_violin(data = df_violin, aes(x = Parasite, y = relativediff, fill = Parasite)) +
+  scale_fill_manual(values = colors_parasites_light) +
+
+  new_scale_fill() +
+
+  geom_jitter(
+    data = df_points,
+    aes(x = Parasite, y = relativediff, fill = Parasite),
+    shape = 21, color = "black", stroke = 0.5,
+    width = 0.2, alpha = 0.7, size = 2.5
+  ) +
+  scale_fill_manual(values = colors_parasites_dark, guide = "none") +
+
+  ylab("(AUC_overall - AUC_visible) / AUC_overall") +
+  presets +
+  theme(legend.position = "none",
+        axis.title.x = element_blank())+
+  scale_x_discrete(labels = labels_parasite_italics)
+
+ggsave("AUC_rough_draft.png", AUC_fig, width = 12, height = 8, dpi=600, bg="white")
+
+#make a plot with only points, less jitter
+AUC_pointsfig <- ggplot()+
+  geom_jitter(
+    data = auc_all,
+    aes(x = Parasite, y = relativediff, color = Parasite, shape=Lake),
+    stroke = 0.5,
+    width = 0.08, alpha = 0.7, size = 3
+  ) +
+  ylim(0,1.01)+
+  scale_fill_manual(values = colors_parasites_dark, guide = "none") +
+
+  ylab("(Overall AUC - Visible AUC) / Overall AUC") +
+  presets +
+  theme(legend.position = "none",
+        axis.title.x = element_blank())+
+  scale_x_discrete(labels = labels_parasite_italics)+
+   theme(axis.text.x = element_text(face = "italic"))
+
+AUC_pointsfig
+ggsave("AUC_pointsonly.png", AUC_fig, width = 12, height = 8, dpi=600, bg="white")
+
+AUC_pointsfig
+
+
+#make another AUC figure dividing by lake to visuaoly asseks if animals in different lakes have significantly different invisible burdens
+AUC_bylake <- ggplot()+
+  geom_jitter(
+    data = auc_all,
+    aes(x = Lake, y = relativediff, fill = Parasite),
+   shape=21, color = "black", stroke = 0.5,
+    width = 0.08, alpha = 0.7, size = 3
+  ) +
+  ylim(0,1.01)+
+  scale_fill_manual(values = colors_parasites_dark, guide = "none") +
+
+  ylab("(Overall AUC - Visible AUC) / Overall AUC") +
+  presets #+
+  #theme(legend.position = "none",
+        #axis.title.x = element_blank())+
+  #scale_x_discrete(labels = labels_parasite_italics)+
+   #theme(axis.text.x = element_text(face = "italic"))
+AUC_bylake
+
+```
+
+
+```{r, AUC_stats}
+
+range(auc_all$relativediff)
+# Subset to groups with n ≥ 3
+filtered_data <- auc_all %>%
+  group_by(Parasite) %>%
+  filter(n() >= 3)
+
+#do non-parametric test (kurskal-wallis)
+kruskal.test(relativediff ~ Parasite, data = filtered_data)
+
+
+pairwise.wilcox.test(filtered_data$relativediff, filtered_data$Parasite,
+                     p.adjust.method = "BH")
+
+#try a kruskal wallis test for comparing invisible burdens by lake
+kruskal.test(relativediff~Lake, data=auc_all)
+
+```
+
+
+########################################
+########################################
+########################################
+########################################
+########################################
+
+Male Female & Adult Juvenile Tests
+Using the wide latent infection data, create a row for infection/no infection
+Compare total numbers? Use Z-test
+
+```{r}
+#modify data_wide
+compdata <- data_wide
+
+#only use animals that did not have early mortality
+compdata <- compdata %>%
+  filter(ear_mort == FALSE)
+
+#add a column which indicates ANY infection
+Y_inf <-c("micg","past","micg_past","sprite","sprite_spiro","spiro","unk",
+                     "sprite_micg","brood","metsch","micg_unk_p/s","sprite_brood",
+                     "sprite_past","sprite_metsch")
+
+compdata$infected <- apply(compdata[, c("D0", "D1","D4", "D8","D11","D15")], 1, function(row){
+  any(row %in% Y_inf)
+})
+
+unique(long_data$INFSTATUS)
+#create a column with infection status for a GLMM
+compdata <- compdata %>%
+  mutate(
+    infstatus = case_when(
+      micg & past ~ "micg_past",
+      sprite & spiro ~ "sprite_spiro",
+      sprite & micg ~ "sprite_micg",
+      sprite & brood ~ "sprite_brood",
+      sprite & past ~ "sprite_past",
+      sprite & metsch ~ "sprite_metsch",
+      brood == TRUE ~ "brood",
+      micg == TRUE ~ "micg",
+      metsch== TRUE ~ "metsch",
+      sprite== TRUE ~ "sprite",
+      past== TRUE ~ "past",
+      spiro== TRUE ~ "spiro",
+      TRUE ~ "uninf"
+    )
+  )
+compdata
+
+
+#################MODELS##################
+#now we should be able to do a glmm with lake  as random effect
+#first, create a column where infection t/f is binary, not true/false
+compdata$infectedbinary <- as.integer(compdata$infected)
+
+#filter out males for this test
+compdata_filt <- subset(compdata, Age==c("A","J"))
+
+#now, run a glmm
+model1 <- glmer(infectedbinary ~ Age+ (1|Lake),
+               data = compdata_filt,
+               family = binomial)
+
+summary(model1)
+
+###new model glmer(infectedbinary ~parasite + Round + (1|Lake))
+
+#ran models which included infection status as both fixed and random, but it drove a majority of the variation (which makes sense given the huge differences int the distribution of different parasites)
+sim_res <- simulateResiduals(fittedModel=model1)
+plot(sim_res)
+testDispersion(sim_res)
+
+#all checks are not significant
+
+
+#now to do male/female comparisons
+#filter down to round 9 since it was the only round with 
+compdata_sex <- subset(compdata, Round==9)
+
+#make a sex column comparing males to adults and females? 
+compdata_sex <- compdata_sex %>%
+  mutate(
+    sex = case_when(
+      Age=="M" ~ "male",
+      Age %in% c("A","J") ~ "female"
+      
+    )
+  )
+compdata_sex
+
+#now do a glmm with sex, with lake as a random effect
+#now, run a glmm
+model2 <- glmer(infectedbinary ~ sex+ (1|Lake),
+               data = compdata_sex,
+               family = binomial)
+
+summary(model2)
+
+#nothing is significant here
+
+#check model
+sim_res2 <- simulateResiduals(fittedModel=model2)
+plot(sim_res2)
+testDispersion(sim_res2)
+
+
+
+#z test alternative, not really going to work for our purposes. 
+#all checks are not significant
+#now, we should be able to sum total occurrences of infection
+juveniles <- subset(compdata, Age=="J")
+adults <- subset(compdata, Age=="A")
+
+n_juveniles<-length(juveniles$infected)
+n_infjuveniles <- sum(juveniles$infected)
+n_juveniles
+n_infjuveniles
+
+n_adults <-length(adults$infected)
+n_infadults <-sum(adults$infected)
+n_adults
+n_infadults
+
+#run z-test to compare proportions
+infected_aj <- c(n_infadults,n_infjuveniles)
+total_aj <-c(n_adults, n_juveniles)
+
+prop.test(infected_aj,total_aj)
+```
+```{r,reformatting_data_stats}
+#we need to change the compdata set so that instead of having infecting T/F overall we have an infected binary for each individual parasite and another column with the parasite identity 
+
+#parasites: brood, past, spiro, sprite, metsch, micg
+#dataset we're using to modify: compdata
+head(compdata)
+sum(compdata$ear_mort)
+#compdata has the identifier columns for the type of infection contracted although that might nnot be the best way to approach this since it will better for coinfections to read directly from the relevant columns 
+#nevermind, use the long_data we've already formatted 
+
+
+# Step 1: Convert to long format and exclude non-infections
+df_long <- compdata %>%
+  pivot_longer(cols = starts_with("D"), names_to = "Check", values_to = "Parasite") %>%
+  filter(!Parasite %in% c("u", "dead"))  # Exclude non-infections
+
+# Step 2: Create a list of actual infections (one row per ID-parasite)
+infected <- df_long %>%
+  group_by(ID, Parasite) %>%
+  summarise(Infected = 1, .groups = "drop")
+
+# Step 3: Create all possible ID × parasite combinations
+all_parasites <- unique(df_long$Parasite)
+all_ids <- unique(df$ID)
+
+full_grid <- expand_grid(ID = all_ids, Parasite = all_parasites)
+
+# Step 4: Join and fill missing with 0 (not infected)
+final <- full_grid %>%
+  left_join(infected, by = c("ID", "Parasite")) %>%
+  mutate(Infected = ifelse(is.na(Infected), 0, Infected))
+
+# View the final result
+print(final)
+
+bishop_sprite
+
+```
+
+
+```{r, prop_figure}
+#make a figure with two panels showing proportion infected by age and a separate panel showing proportion infected by sex
+prop_aj <- compdata_filt %>%
+  group_by(Age) %>%
+  summarise(
+    prop_infected = mean(infectedbinary),
+    n = n()
+  )
+
+#plot
+ggplot(prop_aj, aes(x = Age, y = prop_infected, fill = Age)) +
+  geom_col(width = 0.6) +
+  labs(
+    x = "Age Group",
+    y = "Proportion Infected",
+    title = "Proportion of Infected Individuals by Age"
+  ) +
+  scale_y_continuous(limits = c(0, 1), expand = c(0, 0)) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+
+```
+Prop test higher
+#####################
+####################
+2-sample test for equality of proportions with continuity correction
+
+data:  infected_aj out of total_aj
+X-squared = 32.595, df = 1, p-value = 1.135e-08
+alternative hypothesis: two.sided
+95 percent confidence interval:
+ 0.07537237 0.15431501
+sample estimates:
+   prop 1    prop 2 
+0.4640057 0.3491620 
+#################
+##################
+
+```{r, stats_in_results}
+#how many lake/days had less than 40 Adults/40 Juveniles
+countstable <- table(data_wide$Lake, data_wide$Round)
+countstable
+counts_vector <- as.vector(countstable)
+
+counts_vec_nozero <- counts_vector[counts_vector!=0]
+
+mean_no_zeros <-mean(counts_vec_nozero)
+mean_no_zeros
+
+median_no_zeroes <- median(counts_vec_nozero)
+median_no_zeroes
+
+#check the total number of animals which made it past D4 and were therefore included
+(length(data_wide$ear_mort)-sum(data_wide$ear_mort))/length(data_wide$ear_mort)
+```
+
+########################Stats##########################
+
+
+
+
+
+
